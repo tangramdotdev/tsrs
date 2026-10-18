@@ -17,7 +17,7 @@ generators=(
   "node tools/gen-ast/gen-ast.ts"
   "node tools/gen-ast/gen-flags.ts"
   "node crates/tsrs_api_codec/gen/gen-codec.ts"
-  "python3 tools/gen/stringutil_tables.py"
+  "cargo run --quiet --locked -p tsrs_generate_stringutil -- --write"
   "python3 tools/gen-diagnostics/gen.py"
   "python3 tools/gen-libs/gen.py"
   "node tools/gen-lsproto/generate.mts"

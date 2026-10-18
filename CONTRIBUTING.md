@@ -35,6 +35,9 @@ tools/lint/source.py                              # unsafe Send/Sync inventory, 
 tools/gen-check.sh                                # generated code matches its generator (change the generator, then --write)
 ```
 
+The Unicode casing generator is in [`tasks/generate_stringutil`](tasks/generate_stringutil/README.md):
+`cargo run -p tsrs_generate_stringutil -- --write` regenerates its tables; `--check` checks freshness without writing.
+
 Use the `dev` profile (release optimization, no LTO, incremental) while editing and testing: a checker edit rebuilds
 `tsrs` and `tsrs-test` in about 5 s instead of about 3 minutes with `--release`, and the conformance suite gives the
 same results in the same time (notes/dev-loop-build.md). Build `--release` for performance measurements: its fat LTO

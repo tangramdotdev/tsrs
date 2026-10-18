@@ -140,6 +140,11 @@ with the switch off, which is why it is not in the default build.
 
 ## Measured and rejected (do not redo)
 
+- Compact Unicode casing offsets ([perf-casing-table.md](perf-casing-table.md), #543): records 64 → 16 bytes and
+  the first candidate's stripped binary -160,416 bytes, but checked string slices cost +9.24% instructions on the
+  Unicode casing probe. Checked byte slices still cost +2.74% (sigma +1.82%). Retain string references. The Rust
+  generator's `--compact PATH` reproduces the candidate; revisit only with a lower-cost checked lookup.
+
 - Unicode normalization library cleanup ([rust-stdlib-normalization.md](rust-stdlib-normalization.md)), applied at
   the user's request: unicode-normalization 0.1.25 matches the existing Unicode 17 NFD output. Five-pair Mac
   screening on Compiler/Compiler-Unions: -0.017% to -0.011% single instructions, -0.198% to -0.056% default RSS;

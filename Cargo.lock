@@ -981,6 +981,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "tsrs_generate_stringutil"
+version = "0.16.0"
+dependencies = [
+ "regex",
+]
+
+[[package]]
 name = "tsrs_incremental"
 version = "0.16.0"
 dependencies = [
