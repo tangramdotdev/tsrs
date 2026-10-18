@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-"""Head-to-head type-check benchmark on one machine: tsgo (the TypeScript nightly, npm `typescript@next`), the
-TypeScript 7.1-dev nightly built from the commit tsrs ports, tsrs and
+"""Head-to-head type-check benchmark on one machine: TypeScript nightly, the reference nightly tsrs ports, tsrs and
 `bun check`, at the same thread counts.
 
 bench/run.py is the fixed-spec regression benchmark (tsgo vs tsrs). This script answers a different question:
@@ -29,14 +28,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import run as rb  # noqa: E402  (bench/run.py: project setup, compiler install, output parsing)
 
 COMPILERS = ("tsgo", "tsgo-dev", "tsrs", "bun")
-LABELS = {"tsgo": "tsgo nightly", "tsgo-dev": "tsgo 7.1-dev", "tsrs": "tsrs", "bun": "bun check"}
-
-
-def labels(result: dict) -> dict[str, str]:
-    """A result without a `tsgo` entry measured `typescript@7.0.2` as `tsgo`."""
-    return LABELS if result.get("tsgo") else {**LABELS, "tsgo": "tsgo 7.0.2"}
+LABELS = {"tsgo": "tsgo", "tsgo-dev": "tsgo reference", "tsrs": "tsrs", "bun": "bun check"}
 # bun's summary line: "checked N files" with errors, "No type errors in N files" without.
 BUN_FILES_RE = re.compile(r"(?:checked|No type errors in) ([\d,]+) files?")
+# The Files row of tsgo's and tsrs's --extendedDiagnostics, which only the untimed warm-up prints.
+FILES_RE = re.compile(r"^Files:\s+(\d+)\s*$")
 
 
 def thread_flags(compiler: str, threads: str) -> list[str]:
@@ -48,12 +44,13 @@ def thread_flags(compiler: str, threads: str) -> list[str]:
     return ["--threads", threads] if compiler == "bun" else ["--checkers", threads]
 
 
-def argv_for(compiler: str, exe: Path, proj: Path, threads: str) -> list[str]:
+def argv_for(compiler: str, exe: Path, proj: Path, threads: str, stats: bool = False) -> list[str]:
+    """`stats` adds --extendedDiagnostics, for the untimed warm-up only: it slows tsgo's exit (bench/run.py TIMED_FLAGS)."""
     if compiler == "bun":
         # --all: no grouping of repeated errors (bun groups above 50), so every error line is counted.
         return [str(exe), "check", "-p", str(proj), "--no-pretty", "--all", *thread_flags(compiler, threads)]
-    return [str(exe), "-p", str(proj), "--noEmit", "--incremental", "false", "--extendedDiagnostics", "--pretty",
-            "false", *thread_flags(compiler, threads)]
+    return [str(exe), "-p", str(proj), *rb.TIMED_FLAGS, *(["--extendedDiagnostics"] if stats else []),
+            *thread_flags(compiler, threads)]
 
 
 def normalize_key(key: str, cwd: Path, proj_dir: Path) -> str:
@@ -72,35 +69,43 @@ def normalize_key(key: str, cwd: Path, proj_dir: Path) -> str:
     return key
 
 
-def run_once(compiler: str, exe: Path, cwd: Path, proj: Path, threads: str, log_path: Path, timeout: float) -> dict:
-    argv = argv_for(compiler, exe, proj, threads)
+def run_once(compiler: str, exe: Path, cwd: Path, proj: Path, threads: str, log_path: Path, timeout: float,
+             stats: bool = False) -> dict:
+    argv = argv_for(compiler, exe, proj, threads, stats)
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with open(log_path, "wb") as out:
-        t0 = time.perf_counter()
+        if not stats:
+            t0 = time.perf_counter()
         p = subprocess.Popen(argv, cwd=cwd, stdout=out, stderr=subprocess.STDOUT)
         timer = threading.Timer(timeout, p.kill)
         timer.start()
-        _, status, ru = os.wait4(p.pid, 0)
-        wall = time.perf_counter() - t0
+        if stats:
+            p.wait()
+        else:
+            _, status, ru = os.wait4(p.pid, 0)
+            wall = time.perf_counter() - t0
+            p.returncode = os.waitstatus_to_exitcode(status)
         timer.cancel()
-    p.returncode = os.waitstatus_to_exitcode(status)
-    peak = ru.ru_maxrss * (1 if sys.platform == "darwin" else 1024)
-    r: dict = {"exit": p.returncode, "wall_s": round(wall, 3), "peak_rss_bytes": peak}
-    keys = []
+    r: dict = {"exit": p.returncode}
+    if not stats:
+        peak = ru.ru_maxrss * (1 if sys.platform == "darwin" else 1024)
+        r.update(wall_s=round(wall, 3), peak_rss_bytes=peak)
+    keys, crashed = [], False
     proj_dir = proj if proj.is_dir() else proj.parent
     for line in log_path.read_text(errors="replace").splitlines():
         if m := rb.ERROR_RE.match(line):
             keys.append(normalize_key(m.group(1), cwd, proj_dir))
-        elif m := rb.COUNTER_RE.match(line):
-            r[m.group(1).lower()] = int(m.group(2))
-        elif m := rb.TIME_RE.match(line):
-            r[f"{m.group(1).lower()}_s"] = float(m.group(2))
+        elif rb.CRASH_RE.match(line):
+            crashed = True
+        elif stats and (m := FILES_RE.match(line)):
+            r["files"] = int(m.group(1))
         elif compiler == "bun" and (m := BUN_FILES_RE.search(line)):
             r["files"] = int(m.group(1).replace(",", ""))
     r["errors"] = len(keys)
     r["error_keys"] = sorted(keys)
-    # tsgo/tsrs print --extendedDiagnostics after a completed check; bun prints its "checked N files" summary.
-    finished = "files" in r if compiler == "bun" else "check_s" in r
+    # bun prints its "checked N files" summary after a completed check; tsgo and tsrs exit 0 without errors and 1 or 2
+    # with them.
+    finished = "files" in r if compiler == "bun" else not crashed
     r["ok"] = p.returncode in (0, 1, 2) and finished
     return r
 
@@ -134,15 +139,15 @@ def gib(b: float | None) -> str:
 def markdown(result: dict) -> str:
     m = result["machine"]
     v = result["versions"]
-    names = labels(result)
     lines = [
-        f"## Head-to-head on {m['cpus']} threads: {', '.join(names[c] for c in result['compilers'])}",
+        f"## Head-to-head on {m['cpus']} threads: tsgo, tsgo reference, tsrs, bun check",
         "",
         f"Machine: {m['label']}. Date: {result['date']}. Mean of {result['reps']} interleaved runs per cell (the "
-        f"compiler order rotates every rep), after one untimed warm-up per compiler and project.",
+        f"compiler order rotates every rep), after one untimed warm-up per compiler and project. The timed runs pass "
+        f"no `--extendedDiagnostics`; the warm-up does, for the file counts.",
         "",
-        "Compilers: " + "; ".join(f"{names[c]} = `{v[c]}`" for c in result["compilers"]) + "."
-        + (f" tsgo nightly: {rb.tsgo_text(result['tsgo'])}." if result.get("tsgo") else ""),
+        "Compilers: " + "; ".join(f"{LABELS[c]} = `{v[c]}`" for c in result["compilers"]) + "."
+        + (f" tsgo: {rb.tsgo_text(result['tsgo'])}." if result.get("tsgo") else ""),
         "",
         "Threads: `default` passes no flag (tsgo then uses 4 checker threads, tsrs every core up to 16, then half the cores, at most 32, bun "
         "one thread per core). N passes `--checkers N` to tsgo/tsrs (checker threads; parsing still uses every core) "
@@ -152,8 +157,8 @@ def markdown(result: dict) -> str:
     base = "tsgo"
     for name, pr in result["projects"].items():
         lines += [f"### {name}", "",
-                  f"| threads | compiler | wall mean ± sd (s) | median | min | peak RSS (mean) | vs {names[base]} default | "
-                  f"vs {names[base]} same threads | errors | = 7.1-dev errors |",
+                  "| threads | compiler | wall mean ± sd (s) | median | min | peak RSS (mean) | vs tsgo default | "
+                  "vs tsgo same threads | errors | = reference errors |",
                   "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |"]
         base_default = pr.get("default", {}).get(base, {}).get("wall_s", {}).get("mean")
         for threads in result["threads"]:
@@ -162,20 +167,20 @@ def markdown(result: dict) -> str:
             for c in result["compilers"]:
                 s = cell.get(c)
                 if not s or not s["ok_runs"]:
-                    lines.append(f"| {threads} | {names[c]} | **FAILED** | | | | | | | |")
+                    lines.append(f"| {threads} | {LABELS[c]} | **FAILED** | | | | | | | |")
                     continue
                 w, rss = s["wall_s"], s["peak_rss_bytes"]
                 vs_d = f"{base_default / w['mean']:.2f}x" if base_default else "n/a"
                 vs_s = f"{same / w['mean']:.2f}x" if same else "n/a"
                 eq = {True: "yes", False: "**no**", None: "n/a"}[s.get("errors_equal_ref")]
-                lines.append(f"| {threads} | {names[c]} | {w['mean']:.2f} ± {w['stdev']:.2f} | {w['median']:.2f} | "
+                lines.append(f"| {threads} | {LABELS[c]} | {w['mean']:.2f} ± {w['stdev']:.2f} | {w['median']:.2f} | "
                              f"{w['min']:.2f} | {gib(rss['mean'])} | {vs_d} | {vs_s} | "
                              f"{'/'.join(map(str, s['error_counts']))} | {eq} |")
-        files = {c: pr.get("default", {}).get(c, {}).get("files") for c in result["compilers"]}
-        lines += ["", "Files: " + ", ".join(f"{names[c]} {'/'.join(map(str, f))}" for c, f in files.items() if f)
+        files = {c: pr.get("files", {}).get(c) or pr.get("default", {}).get(c, {}).get("files") for c in result["compilers"]}
+        lines += ["", "Files: " + ", ".join(f"{LABELS[c]} {'/'.join(map(str, f))}" for c, f in files.items() if f)
                   + " (tsgo/tsrs: files in the program; bun: its own \"checked N files\" count, not comparable).", ""]
-    lines += [f"vs {names[base]}: {names[base]}'s mean wall divided by this row's (above 1 = faster). = 7.1-dev errors: the "
-              "(file, line, column, code) list equals tsgo 7.1-dev's at default threads, the TypeScript commit tsrs "
+    lines += ["vs tsgo: tsgo's mean wall divided by this row's (above 1 = faster). = reference errors: the "
+              "(file, line, column, code) list equals the reference compiler's at default threads, the TypeScript commit tsrs "
               "ports. Peak RSS: `ru_maxrss` from `wait4`. Wall: process wall clock including startup."]
     return "\n".join(lines) + "\n"
 
@@ -188,9 +193,8 @@ def main() -> None:
     ap.add_argument("--projects", default="vscode", help="comma-separated subset of bench/projects.json")
     ap.add_argument("--threads", default="default,4,8,16,all",
                     help="comma-separated: default, a number, or all (= os.cpu_count())")
-    ap.add_argument("--tsgo-version", default=os.environ.get(rb.TSGO_VERSION_ENV) or None,
-                    help=f"measure this exact npm version as tsgo instead of resolving bench/projects.json's tag "
-                         f"(`next`; default: ${rb.TSGO_VERSION_ENV})")
+    ap.add_argument("--tsgo-version", help="measure this npm version of typescript as tsgo instead of "
+                                           "bench/projects.json's pinned nightly")
     ap.add_argument("--reps", type=int, default=20)
     ap.add_argument("--timeout", type=float, default=900)
     ap.add_argument("--work-dir", type=Path, default=rb.BENCH / ".work")
@@ -221,11 +225,11 @@ def main() -> None:
     work = args.work_dir.resolve()
     exes: dict[str, Path] = {}
     versions: dict[str, str] = {}
-    tsgo_cfg = rb.resolve_tsgo(cfg["tsgo"], args.tsgo_version) if "tsgo" in compilers else None
+    tsgo_pkg = rb.tsgo_package(cfg, args.tsgo_version)
+    tsgo_info = rb.tsgo_provenance(tsgo_pkg) if "tsgo" in compilers else None
     for c in compilers:
         if c == "tsgo":
-            exes[c] = rb.ensure_tsgo(tsgo_cfg, work).resolve()
-            rb.log(f"tsgo: {rb.tsgo_text(tsgo_cfg)}")
+            exes[c] = rb.ensure_tsgo(tsgo_pkg, work).resolve()
         elif c == "tsgo-dev":
             exes[c] = rb.ensure_tsgo(cfg["reference"], work).resolve()
         else:
@@ -241,15 +245,19 @@ def main() -> None:
     now = dt.datetime.now(dt.timezone.utc)
     machine = rb.machine_info(False, args.label)
     result: dict = {"date": now.strftime("%Y-%m-%d %H:%M UTC"), "machine": machine, "tsrs_commit": commit,
-                    "versions": versions, "tsgo": tsgo_cfg, "compilers": compilers, "threads": threads, "reps": args.reps,
+                    "versions": versions, "tsgo": tsgo_info, "compilers": compilers, "threads": threads, "reps": args.reps,
                     "projects": {}, "raw": []}
     logs = work / "logs" / f"compare-{now.strftime('%Y%m%d-%H%M%S')}"
     t_start = time.perf_counter()
     for n in names:
         cwd, proj = rb.project_path(cfg, by_name[n], work)
+        files = {}
         for c in compilers:
             rb.log(f"{n}: warm-up ({c}, untimed)")
-            run_once(c, exes[c], cwd, proj, "default", logs / f"{n}-warmup-{c}.log", args.timeout)
+            warm = run_once(c, exes[c], cwd, proj, "default", logs / f"{n}-warmup-{c}.log", args.timeout,
+                            stats=c != "bun")
+            if c != "bun" and "files" in warm:
+                files[c] = [warm["files"]]
         runs = {t: {c: [] for c in compilers} for t in threads}
         for rep in range(args.reps):
             order = compilers[rep % len(compilers):] + compilers[:rep % len(compilers)]
@@ -265,6 +273,7 @@ def main() -> None:
         ref_runs = [r for r in runs.get("default", {}).get("tsgo-dev", []) if r["ok"]]
         ref_keys = tuple(ref_runs[0]["error_keys"]) if ref_runs else None
         result["projects"][n] = {t: {c: summarize(runs[t][c], ref_keys) for c in compilers} for t in threads}
+        result["projects"][n]["files"] = files
     result["duration_s"] = round(time.perf_counter() - t_start)
 
     table = markdown(result)

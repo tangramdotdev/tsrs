@@ -4,8 +4,9 @@
 // The async grace period is short and configurable: TSRS_CHECKER_TEST_GRACE_MS (default 300). Every
 // scenario runs under a hard bound so a hang fails instead of blocking the test run.
 
-use std::sync::mpsc;
+use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::sync::Arc;
+use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -15,17 +16,25 @@ use tsrs_api_transport::msgpack::{MessagePackReader, MessagePackWriter, MessageT
 use tsrs_core::json::{self, Value};
 
 use super::lease;
-use super::session_tests::{get, obj, session_with, S};
+use super::session_tests::{S, get, obj, session_with};
 
-const Q_FILES: &[(&str, &str)] = &[("/q/tsconfig.json", r#"{ "files": ["q.ts"] }"#), ("/q/q.ts", "export const q: number = 1;\n")];
+const Q_FILES: &[(&str, &str)] = &[
+    ("/q/tsconfig.json", r#"{ "files": ["q.ts"] }"#),
+    ("/q/q.ts", "export const q: number = 1;\n"),
+];
 const REENTRANT_PREFIX: &str = "api: client error: the program's API checker is in use by a request that is waiting on a client callback";
 
 fn grace() -> Duration {
-    Duration::from_millis(std::env::var("TSRS_CHECKER_TEST_GRACE_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(300))
+    Duration::from_millis(
+        std::env::var("TSRS_CHECKER_TEST_GRACE_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(300),
+    )
 }
 
 /// Forwards to core's Session, plus test methods that hold a program's API checker gate:
-/// `holdCb {which}` holds it across a client call "cb"; `hold {which, ms}` holds it while sleeping;
+/// `holdCb {which}` holds it across a client call "cb"; `holdGate {which}` holds it until released;
 /// `cbOnly` makes a client call without holding anything; `waitOne {which}` acquires once;
 /// `twoWaits` acquires p then q (sequentially, releasing in between).
 struct H {
@@ -63,7 +72,8 @@ impl Ctl {
 impl H {
     fn program(&self, which: &str) -> &'static tsrs_compiler::Program {
         let sd = self.s.session.snapshot_data(self.s.snapshot as u64).unwrap();
-        let project = if which == "q" { "/q/tsconfig.json".to_string() } else { self.s.project.clone() };
+        let project =
+            if which == "q" { "/q/tsconfig.json".to_string() } else { self.s.project.clone() };
         sd.get_program(&tsrs_project::ID(project)).unwrap()
     }
 
@@ -87,9 +97,15 @@ fn which(params: &[u8]) -> String {
 }
 
 impl transport::Handler for H {
-    fn handle_request(&self, _cx: &transport::RequestContext, method: &str, params: &[u8]) -> Result<transport::Response, transport::ApiError> {
+    fn handle_request(
+        &self,
+        _cx: &transport::RequestContext,
+        method: &str,
+        params: &[u8],
+    ) -> Result<transport::Response, transport::ApiError> {
         let call = |name: &str, arg: &str| -> Result<Vec<u8>, transport::ApiError> {
-            transport::Caller::call(&*self.caller, name, Some(arg.as_bytes())).map_err(|e| transport::ApiError::internal(e.to_string()))
+            transport::Caller::call(&*self.caller, name, Some(arg.as_bytes()))
+                .map_err(|e| transport::ApiError::internal(e.to_string()))
         };
         match method {
             "holdCb" => {
@@ -97,15 +113,6 @@ impl transport::Handler for H {
                 let _lease = self.acquire(&w)?;
                 let r = call("cb", &json::marshal_string(&w))?;
                 Ok(transport::Response::Json(r))
-            }
-            "hold" => {
-                let _lease = self.acquire(&which(params))?;
-                let ms = match param(params, "ms") {
-                    Value::Number(n) => n as u64,
-                    _ => 0,
-                };
-                thread::sleep(Duration::from_millis(ms));
-                Ok(transport::Response::Json(b"\"held\"".to_vec()))
             }
             "cbOnly" => Ok(transport::Response::Json(call("cbOnly", "null")?)),
             "holdGate" => {
@@ -118,8 +125,8 @@ impl transport::Handler for H {
                 Ok(transport::Response::Json(b"\"held\"".to_vec()))
             }
             "waitOne" => {
-                self.ctl.event("waiting");
                 let start = Instant::now();
+                self.ctl.event("waiting");
                 drop(self.acquire(&which(params))?);
                 Ok(transport::Response::Json(start.elapsed().as_millis().to_string().into_bytes()))
             }
@@ -128,10 +135,14 @@ impl transport::Handler for H {
                 drop(self.acquire("p")?);
                 let first = start.elapsed().as_millis();
                 drop(self.acquire("q")?);
-                Ok(transport::Response::Json(format!("[{first},{}]", start.elapsed().as_millis()).into_bytes()))
+                Ok(transport::Response::Json(
+                    format!("[{first},{}]", start.elapsed().as_millis()).into_bytes(),
+                ))
             }
             _ => match crate::handler::Handler::handle_request(&*self.s.session, method, params) {
-                Ok(crate::handler::Response::Json(t)) => Ok(transport::Response::Json(t.into_bytes())),
+                Ok(crate::handler::Response::Json(t)) => {
+                    Ok(transport::Response::Json(t.into_bytes()))
+                }
                 Ok(crate::handler::Response::Binary(b)) => Ok(transport::Response::Binary(b)),
                 Err(e) => Err(transport::ApiError::internal(e.to_string())),
             },
@@ -141,12 +152,26 @@ impl transport::Handler for H {
     fn handle_notification(&self, _cx: &transport::RequestContext, _method: &str, _params: &[u8]) {}
 }
 
-fn bounded<T: Send + 'static>(what: &str, limit: Duration, f: impl FnOnce() -> T + Send + 'static) -> T {
+fn bounded<T: Send + 'static>(
+    what: &str,
+    limit: Duration,
+    f: impl FnOnce() -> T + Send + 'static,
+) -> T {
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
-        let _ = tx.send(f());
+        let _ = tx.send(catch_unwind(AssertUnwindSafe(f)));
     });
-    rx.recv_timeout(limit).unwrap_or_else(|_| panic!("{what}: hung (> {limit:?})"))
+    match rx.recv_timeout(limit).unwrap_or_else(|_| panic!("{what}: hung (> {limit:?})")) {
+        Ok(value) => value,
+        Err(payload) => resume_unwind(payload),
+    }
+}
+
+fn expect_event(events: &mpsc::Receiver<&'static str>, expected: &str) {
+    let event = events
+        .recv_timeout(Duration::from_secs(20))
+        .unwrap_or_else(|_| panic!("no {expected} event"));
+    assert_eq!(event, expected);
 }
 
 /// (params for a checker request that needs the /p API checker, params for one that needs none)
@@ -172,7 +197,11 @@ impl Async {
         let conn = transport::AsyncConn::new(
             Box::new(FrameReader::new(server_r)),
             Box::new(FrameWriter::new(server_w)),
-            Arc::new(H { s, caller: std::sync::Arc::clone(&late), ctl: std::sync::Arc::clone(&ctl) }),
+            Arc::new(H {
+                s,
+                caller: std::sync::Arc::clone(&late),
+                ctl: std::sync::Arc::clone(&ctl),
+            }),
             transport::ConnOptions { reentrancy_grace: grace, ..Default::default() },
             None,
         );
@@ -182,23 +211,51 @@ impl Async {
     }
 
     fn send(&mut self, id: u32, method: &str, params: &str) {
-        let params = if params.is_empty() { String::new() } else { format!(r#","params":{params}"#) };
-        self.w.write_frame(format!(r#"{{"jsonrpc":"2.0","id":{id},"method":"{method}"{params}}}"#).as_bytes()).unwrap();
+        let params =
+            if params.is_empty() { String::new() } else { format!(r#","params":{params}"#) };
+        self.w
+            .write_frame(
+                format!(r#"{{"jsonrpc":"2.0","id":{id},"method":"{method}"{params}}}"#).as_bytes(),
+            )
+            .unwrap();
     }
 
     fn read(&mut self) -> Value {
         json::unmarshal(std::str::from_utf8(&self.r.read_frame().unwrap()).unwrap()).unwrap()
     }
 
+    // Releasing a lease precedes writing the response, so waiters may answer before the holder.
+    fn read_results(&mut self, ids: &[u32]) -> Vec<Value> {
+        let responses: Vec<_> = ids.iter().map(|_| self.read()).collect();
+        ids.iter()
+            .map(|&id| {
+                let response = responses
+                    .iter()
+                    .find(|v| get(v, "id") == Value::Number(f64::from(id)))
+                    .unwrap_or_else(|| panic!("missing response {id}: {responses:?}"));
+                result(response)
+            })
+            .collect()
+    }
+
     /// Reads a server -> client call and returns its id (JSON text) and params.
     fn read_call(&mut self, method: &str) -> (String, Value) {
         let v = self.read();
-        assert_eq!(get(&v, "method"), Value::String(method.into()), "{}", json::marshal(&v).unwrap());
+        assert_eq!(
+            get(&v, "method"),
+            Value::String(method.into()),
+            "{}",
+            json::marshal(&v).unwrap()
+        );
         (json::marshal(&get(&v, "id")).unwrap(), get(&v, "params"))
     }
 
     fn answer(&mut self, call_id: &str, result: &str) {
-        self.w.write_frame(format!(r#"{{"jsonrpc":"2.0","id":{call_id},"result":{result}}}"#).as_bytes()).unwrap();
+        self.w
+            .write_frame(
+                format!(r#"{{"jsonrpc":"2.0","id":{call_id},"result":{result}}}"#).as_bytes(),
+            )
+            .unwrap();
     }
 
     fn finish(self) {
@@ -239,7 +296,11 @@ fn async_genuine_reentry_fails_after_the_grace_period_and_lease_free_requests_pr
         a.send(2, "getTypeAtPosition", &needs);
         let resp = a.read();
         let waited = start.elapsed();
-        assert!(error_message(&resp).starts_with(REENTRANT_PREFIX), "{}", json::marshal(&resp).unwrap());
+        assert!(
+            error_message(&resp).starts_with(REENTRANT_PREFIX),
+            "{}",
+            json::marshal(&resp).unwrap()
+        );
         assert!(waited >= g, "rejected after {waited:?}, before the {g:?} grace period");
         a.send(3, "getParentOfSymbol", &free);
         assert_eq!(get(&result(&a.read()), "name"), Value::String("Dog".into()));
@@ -258,24 +319,23 @@ fn async_ordinary_contention_waits_past_the_grace_period() {
         let s = session_with(&[], &["/p/tsconfig.json"]);
         let (needs, _) = requests(&s);
         let mut a = Async::start(s, g);
-        let hold = (g * 3).as_millis();
-        a.send(1, "hold", &format!(r#"{{"which":"p","ms":{hold}}}"#));
-        thread::sleep(g / 6);
+        let events = a.ctl.subscribe();
+        a.send(1, "holdGate", r#"{"which":"p"}"#);
+        expect_event(&events, "holding");
         a.send(2, "waitOne", r#"{"which":"p"}"#);
+        expect_event(&events, "waiting");
         a.send(3, "getTypeAtPosition", &needs);
-        let mut ids = Vec::new();
-        let mut waited = 0;
-        for _ in 0..3 {
-            let v = a.read();
-            if get(&v, "id") == Value::Number(2.0) {
-                waited = ms(&result(&v));
-            } else {
-                result(&v);
-            }
-            ids.push(get(&v, "id"));
-        }
-        assert_eq!(ids[0], Value::Number(1.0), "the holder finishes first: {ids:?}");
-        assert!(waited >= (g * 2).as_millis(), "waitOne waited only {waited} ms behind a {hold} ms holder");
+        thread::sleep(g * 3);
+        a.ctl.release();
+        let results = a.read_results(&[1, 2, 3]);
+        assert_eq!(results[0], Value::String("held".into()));
+        let waited = ms(&results[1]);
+        assert!(
+            waited >= (g * 3).as_millis(),
+            "waitOne waited only {waited} ms behind a {:?} holder",
+            g * 3
+        );
+        assert_eq!(get(&results[2], "flags"), Value::Number(1_048_576.0));
         a.finish();
     });
 }
@@ -291,24 +351,20 @@ fn async_unrelated_attributed_callback_does_not_reject_a_legitimate_wait() {
         let s = session_with(&[], &["/p/tsconfig.json"]);
         let mut a = Async::start(s, g);
         let events = a.ctl.subscribe();
-        let next = |what: &str| events.recv_timeout(Duration::from_secs(20)).unwrap_or_else(|_| panic!("no {what} event"));
         a.send(1, "holdGate", r#"{"which":"p"}"#);
-        assert_eq!(next("holding"), "holding");
+        expect_event(&events, "holding");
         // An unrelated request blocks on the client (attributed to that request) for the whole wait.
         a.send(2, "cbOnly", "");
         let (cb, _) = a.read_call("cbOnly");
         a.send(3, "waitOne", r#"{"which":"p"}"#);
-        assert_eq!(next("waiting"), "waiting");
+        expect_event(&events, "waiting");
         // Longer than the grace period: a spurious rejection would have answered request 3 by now.
         thread::sleep(g * 3);
         a.ctl.release();
-        let first = a.read();
-        assert_eq!(get(&first, "id"), Value::Number(1.0), "the holder answers first: {}", json::marshal(&first).unwrap());
-        result(&first);
-        let waiter = a.read();
-        assert_eq!(get(&waiter, "id"), Value::Number(3.0));
+        let results = a.read_results(&[1, 3]);
+        assert_eq!(results[0], Value::String("held".into()));
         // Not rejected, and it really waited behind the holder for longer than the grace period.
-        assert!(ms(&result(&waiter)) >= (g * 3).as_millis(), "{}", json::marshal(&waiter).unwrap());
+        assert!(ms(&results[1]) >= (g * 3).as_millis(), "{results:?}");
         a.answer(&cb, "null");
         assert_eq!(get(&a.read(), "id"), Value::Number(2.0));
         a.finish();
@@ -335,13 +391,23 @@ fn async_two_waits_in_one_request_each_get_the_full_grace_period() {
         thread::sleep(g * 6 / 10);
         a.answer(&cb_q, "\"q\"");
         let mut got = Vec::new();
-        got.extend(std::iter::repeat_with(|| {
-            let v = a.read();
-            (get(&v, "id"), result(&v))
-        }).take(2));
-        let (_, waits) = got.iter().find(|(id, _)| *id == Value::Number(3.0)).expect("twoWaits response").clone();
+        got.extend(
+            std::iter::repeat_with(|| {
+                let v = a.read();
+                (get(&v, "id"), result(&v))
+            })
+            .take(2),
+        );
+        let (_, waits) = got
+            .iter()
+            .find(|(id, _)| *id == Value::Number(3.0))
+            .expect("twoWaits response")
+            .clone();
         let Value::Array(w) = waits else { panic!("{waits:?}") };
-        assert!(ms(&w[1]) >= (g * 11 / 10).as_millis(), "the two waits together exceed the grace period: {w:?}");
+        assert!(
+            ms(&w[1]) >= (g * 11 / 10).as_millis(),
+            "the two waits together exceed the grace period: {w:?}"
+        );
         a.finish();
     });
 }
@@ -361,7 +427,11 @@ fn async_waiter_exits_when_the_connection_closes() {
         drop(w);
         drop(r);
         let _ = run.join().unwrap();
-        assert!(start.elapsed() < Duration::from_secs(20), "connection close took {:?}", start.elapsed());
+        assert!(
+            start.elapsed() < Duration::from_secs(20),
+            "connection close took {:?}",
+            start.elapsed()
+        );
     });
 }
 
@@ -378,7 +448,10 @@ fn sync_genuine_reentry_fails_immediately_and_lease_free_requests_proceed() {
             Box::new(MessagePackReader::new(server_r)),
             Box::new(MessagePackWriter::new(server_w)),
             Arc::new(H { s, caller: std::sync::Arc::clone(&late), ctl: Arc::new(Ctl::default()) }),
-            transport::ConnOptions { reentrancy_grace: Duration::from_secs(600), ..Default::default() },
+            transport::ConnOptions {
+                reentrancy_grace: Duration::from_secs(600),
+                ..Default::default()
+            },
         );
         late.set(conn.caller());
         let run = thread::spawn(move || conn.run());
@@ -386,7 +459,11 @@ fn sync_genuine_reentry_fails_immediately_and_lease_free_requests_proceed() {
         let mut r = MessagePackReader::new(client_r);
         let mut recv = || {
             let t = r.read_tuple().unwrap();
-            (t.msg_type, String::from_utf8(t.method).unwrap(), String::from_utf8(t.payload).unwrap())
+            (
+                t.msg_type,
+                String::from_utf8(t.method).unwrap(),
+                String::from_utf8(t.payload).unwrap(),
+            )
         };
         w.write_tuple(MessageType::Request, b"holdCb", br#"{"which":"p"}"#).unwrap();
         assert_eq!(recv().0, MessageType::Call);
@@ -395,7 +472,11 @@ fn sync_genuine_reentry_fails_immediately_and_lease_free_requests_proceed() {
         let (ty, method, payload) = recv();
         assert_eq!((ty, method.as_str()), (MessageType::Error, "getTypeAtPosition"), "{payload}");
         assert!(payload.starts_with(REENTRANT_PREFIX), "{payload}");
-        assert!(start.elapsed() < Duration::from_secs(5), "sync rejection took {:?}", start.elapsed());
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "sync rejection took {:?}",
+            start.elapsed()
+        );
         w.write_tuple(MessageType::Request, b"getParentOfSymbol", free.as_bytes()).unwrap();
         let (ty, _, payload) = recv();
         assert_eq!(ty, MessageType::Response, "{payload}");
@@ -440,14 +521,28 @@ fn sync_nested_request_reads_its_own_exact_uint64_literals() {
         let mut r = MessagePackReader::new(client_r);
         let mut recv = || {
             let t = r.read_tuple().unwrap();
-            (t.msg_type, String::from_utf8(t.method).unwrap(), String::from_utf8(t.payload).unwrap())
+            (
+                t.msg_type,
+                String::from_utf8(t.method).unwrap(),
+                String::from_utf8(t.payload).unwrap(),
+            )
         };
         // Outer request (no checker lease involved) blocked in a client call.
         w.write_tuple(MessageType::Request, b"cbOnly", b"").unwrap();
         assert_eq!(recv().0, MessageType::Call);
-        let nested = format!(r#"{{"snapshot":9007199254740993,"project":{},"file":"/p/main.ts","position":0}}"#, json::marshal_string(&project));
+        let nested = format!(
+            r#"{{"snapshot":9007199254740993,"project":{},"file":"/p/main.ts","position":0}}"#,
+            json::marshal_string(&project)
+        );
         w.write_tuple(MessageType::Request, b"getTypeAtPosition", nested.as_bytes()).unwrap();
-        assert_eq!(recv(), (MessageType::Error, "getTypeAtPosition".into(), "api: client error: snapshot 9007199254740993 not found".into()));
+        assert_eq!(
+            recv(),
+            (
+                MessageType::Error,
+                "getTypeAtPosition".into(),
+                "api: client error: snapshot 9007199254740993 not found".into()
+            )
+        );
         w.write_tuple(MessageType::CallResponse, b"cbOnly", b"null").unwrap();
         assert_eq!(recv().0, MessageType::Response);
         drop(w);

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/*"]
+members = ["crates/*", "tasks/*"]
 
 [workspace.package]
 version = "0.16.0"
@@ -21,6 +21,7 @@ commit = "b85298b6a81f772d080b0455de0ca9d744cd6fd6"
 nightly = "7.1.0-dev.20260930.4"
 
 [workspace.dependencies]
+criterion2 = { version = "3.0.4", default-features = false } # Benchmarking
 base64 = { version = "0.23.1", default-features = false, features = ["std"] }
 rustc-hash = "2"
 indexmap = "2"
@@ -70,7 +71,6 @@ tsrs_api_codec = { path = "crates/tsrs_api_codec" }
 tsrs_ipc = { path = "crates/tsrs_ipc" }
 tsrs_contentmapper = { path = "crates/tsrs_contentmapper" }
 tsrs_contentmappertest = { path = "crates/tsrs_contentmappertest" }
-tsrs_fourslash_harness = { path = "crates/tsrs_fourslash_harness" }
 
 [profile.dev]
 # The edit-build-test loop (docs/DEBUGGING.md): release optimization without any LTO, incrementally. A checker edit
@@ -84,24 +84,12 @@ strip = "symbols"
 debug = false
 panic = "unwind"
 
-# Generated fourslash test bodies are glue around the real language-server crates. Optimizing all 4,546 bodies
-# dominates their build but does not make the server under test faster; the hand-written harness is a separate crate.
-[profile.dev.package.tsrs_fourslash]
-opt-level = 0
-codegen-units = 256
-
 # Correctness gates and the native reference of the WebAssembly gate in CI (tools/wasm/gate.sh): release code without
 # LTO, which builds in about a third of the release build's time; these gates compare outputs, which LTO does not change.
 [profile.ci]
 inherits = "release"
 lto = "off"
 codegen-units = 16
-
-# Correctness CI does not need to optimize the generated glue. Override both inherited release package settings;
-# the separate harness and language-server crates remain optimized.
-[profile.ci.package.tsrs_fourslash]
-opt-level = 0
-codegen-units = 256
 
 # Release binaries (.github/workflows/release.yml) build with this profile twice, for PGO: -Cprofile-generate,
 # training run, -Cprofile-use (notes/perf-pgo.md), then BOLT on Linux. Instrumented builds override rustc's LTO to
@@ -115,12 +103,6 @@ strip = "symbols" # set to `false` for debug information
 debug = false # set to `true` for debug information
 panic = "unwind"
 
-# Preserve release's measured compromise for the generated test bodies. The hand-written harness and language-server
-# crates are separate and still use release's opt-level 3 and fat LTO.
-[profile.release.package.tsrs_fourslash]
-opt-level = 1
-codegen-units = 16
-
 [workspace.lints.rust]
 non_upper_case_globals = "allow"
 non_camel_case_types = "allow"
@@ -128,13 +110,12 @@ non_camel_case_types = "allow"
 raw_borrows_via_references = "warn"
 
 [workspace.lints.clippy]
-# Keep the baseline aligned with oxc-project/oxc. The documented Clippy command promotes these warnings to errors;
-# project-specific performance, memory, threading and unsafe lints below are denied directly.
-all = { level = "warn", priority = -2 }
-pedantic = { level = "warn", priority = -1 }
-complexity = { level = "warn", priority = -1 }
-nursery = { level = "warn", priority = -1 }
-cargo = { level = "warn", priority = -1 }
+# Keep the baseline aligned with oxc-project/oxc. Deny every enabled Clippy lint directly.
+all = { level = "deny", priority = -2 }
+pedantic = { level = "deny", priority = -1 }
+complexity = { level = "deny", priority = -1 }
+nursery = { level = "deny", priority = -1 }
+cargo = { level = "deny", priority = -1 }
 correctness = { level = "deny", priority = -1 }
 suspicious = { level = "deny", priority = -1 }
 perf = { level = "deny", priority = -1 }
@@ -173,27 +154,27 @@ struct_field_names = "allow"
 many_single_char_names = "allow"
 
 # Oxc restriction and nursery additions.
-empty_drop = "warn"
-empty_enum_variants_with_brackets = "warn"
-fn_to_numeric_cast_any = "warn"
-unnecessary_self_imports = "warn"
-try_err = "warn"
-error_impl_error = "warn"
-filetype_is_file = "warn"
-get_unwrap = "warn"
-rest_pat_in_fully_bound_structs = "warn"
-unnecessary_safety_comment = "warn"
-infinite_loop = "warn"
-map_with_unused_argument_over_ranges = "warn"
-unused_result_ok = "warn"
-pathbuf_init_then_push = "warn"
-pub_underscore_fields = "warn"
-non_zero_suggestions = "warn"
-precedence_bits = "warn"
-iter_on_single_items = "warn"
-unused_peekable = "warn"
-suspicious_operation_groupings = "warn"
-return_and_then = "warn"
+empty_drop = "deny"
+empty_enum_variants_with_brackets = "deny"
+fn_to_numeric_cast_any = "deny"
+unnecessary_self_imports = "deny"
+try_err = "deny"
+error_impl_error = "deny"
+filetype_is_file = "deny"
+get_unwrap = "deny"
+rest_pat_in_fully_bound_structs = "deny"
+unnecessary_safety_comment = "deny"
+infinite_loop = "deny"
+map_with_unused_argument_over_ranges = "deny"
+unused_result_ok = "deny"
+pathbuf_init_then_push = "deny"
+pub_underscore_fields = "deny"
+non_zero_suggestions = "deny"
+precedence_bits = "deny"
+iter_on_single_items = "deny"
+unused_peekable = "deny"
+suspicious_operation_groupings = "deny"
+return_and_then = "deny"
 
 # A `.clone()` that remains is a real copy.
 redundant_clone = "deny"

@@ -27,7 +27,10 @@ impl MergedSymbols {
     }
 
     #[inline]
-    #[expect(clippy::trivially_copy_pass_by_ref, reason = "preserves the map's borrowed-key lookup API; inlined at callers")]
+    #[expect(
+        clippy::trivially_copy_pass_by_ref,
+        reason = "preserves the map's borrowed-key lookup API; inlined at callers"
+    )]
     pub fn get(&self, symbol: &P<Symbol>) -> Option<&P<Symbol>> {
         let (word, bit) = Self::filter_position(*symbol);
         if self.filter[word] & bit == 0 {
@@ -40,14 +43,5 @@ impl MergedSymbols {
         let (word, bit) = Self::filter_position(source);
         self.filter[word] |= bit;
         self.map.insert(source, target);
-    }
-}
-
-impl crate::heapcensus::HeapSize for MergedSymbols {
-    fn heap_stat(&self) -> crate::heapcensus::HeapStat {
-        let mut stat = self.map.heap_stat();
-        stat.containers += 1;
-        stat.bytes += std::mem::size_of_val(&*self.filter) as u64;
-        stat
     }
 }

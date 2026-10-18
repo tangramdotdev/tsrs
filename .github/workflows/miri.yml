@@ -1,0 +1,45 @@
+name: Miri
+
+permissions: {}
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  miri:
+    name: Miri
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      RUSTUP_TOOLCHAIN: nightly-2026-10-04
+    steps:
+      - uses: taiki-e/checkout-action@7d1e50e93dc4fb3bba58f85018fadf77898aee8b # v1.4.2
+
+      - uses: oxc-project/setup-rust@3d6fb132fbe7cdcb66bf8ec193911c2945369d12 # v1.0.17
+        with:
+          components: miri rust-src
+          save-cache: ${{ github.ref_name == 'main' }}
+          cache-key: warm-miri
+          target-dir: ${{ runner.temp }}/miri
+
+      - name: Arena safety
+        env:
+          # Keep the sysroot outside target/, which rust-cache prunes before saving.
+          MIRI_SYSROOT: ${{ runner.temp }}/miri/sysroot
+          # Thread arenas intentionally retain their chunks until process exit.
+          MIRIFLAGS: -Zmiri-ignore-leaks
+        run: |
+          cargo miri setup
+          # Miri cannot model the compressed pointers' PROT_NONE reservation.
+          cargo miri test --locked -p tsrs_core --features plain-ptrs --lib arena::tests
+          # Require the known protected-borrow violation, not just any command failure.
+          if cargo miri test --locked -p tsrs_core --features plain-ptrs --lib \
+              arena::tests::miri_rejects_freeing_a_reference_parameter -- --exact --ignored > "$RUNNER_TEMP/miri-negative.log" 2>&1; then
+            cat "$RUNNER_TEMP/miri-negative.log"
+            echo "::error::Miri accepted a free of a protected reference parameter"
+            exit 1
+          fi
+          cat "$RUNNER_TEMP/miri-negative.log"
+          grep -q 'error: Undefined Behavior:.*strongly protected' "$RUNNER_TEMP/miri-negative.log"

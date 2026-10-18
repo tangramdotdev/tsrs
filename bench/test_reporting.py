@@ -17,7 +17,7 @@ import run
 class ReportingTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.historical = json.loads((Path(__file__).parent / 'results/2026-10-08-6e82c526ff8e.json').read_text())
+        cls.historical = json.loads((Path(__file__).parent / 'fixtures/reporting-64-vcpu.json').read_text())
 
     def resized(self):
         result = copy.deepcopy(self.historical)
@@ -121,8 +121,7 @@ class ReportingTests(unittest.TestCase):
 class PublishTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.historical = json.loads((Path(__file__).parent / 'results/2026-10-11-177e6cf55d52.json').read_text())
-        cls.historical['projects'] = {'vscode': cls.historical['projects']['vscode']}
+        cls.historical = json.loads((Path(__file__).parent / 'fixtures/reporting-16-vcpu.json').read_text())
 
     def setUp(self):
         directory = tempfile.TemporaryDirectory()
@@ -318,34 +317,44 @@ class PublishTests(unittest.TestCase):
 
 
 class TsgoNightlyTests(unittest.TestCase):
-    NIGHTLY = {'package': 'typescript', 'tag': 'next', 'version': '7.1.0-dev.20261016.1',
-               'commit': 'abcbb2e69d2a86d9ffee66582a0dd0339b674733', 'published': '2026-10-16T08:21:23.515Z'}
+    PINNED = {'package': 'typescript', 'version': '7.1.0-dev.20261016.1'}
+    COMMIT = 'abcbb2e69d2a86d9ffee66582a0dd0339b674733'
+    PUBLISHED = '2026-10-16T08:21:23.515Z'
 
     def view(self, version):
-        meta = {'version': version, 'gitHead': self.NIGHTLY['commit'], 'time': {version: self.NIGHTLY['published']}}
+        meta = {'gitHead': self.COMMIT, 'time': {version: self.PUBLISHED, 'modified': '2026-10-18T00:00:00.000Z'}}
         return subprocess.CompletedProcess([], 0, stdout=json.dumps(meta))
 
-    def test_the_tag_resolves_to_one_recorded_nightly(self):
-        with patch.object(run.subprocess, 'run', return_value=self.view(self.NIGHTLY['version'])) as view:
-            self.assertEqual(self.NIGHTLY, run.resolve_tsgo({'package': 'typescript', 'tag': 'next'}))
-        self.assertEqual(['npm', 'view', '--json', 'typescript@next'], view.call_args.args[0])
+    def test_the_pinned_nightly_records_its_commit_and_publish_time(self):
+        with patch.object(run.subprocess, 'run', return_value=self.view(self.PINNED['version'])) as view:
+            info = run.tsgo_provenance(run.tsgo_package({'tsgo': self.PINNED}))
+        self.assertEqual(['npm', 'view', '--json', 'typescript@7.1.0-dev.20261016.1', 'gitHead', 'time'],
+                         view.call_args.args[0])
+        self.assertEqual(dict(self.PINNED, commit=self.COMMIT, published=self.PUBLISHED), info)
 
-    def test_an_explicit_version_is_measured_instead_of_the_tag(self):
-        with patch.object(run.subprocess, 'run', return_value=self.view('7.1.0-dev.20261015.1')) as view:
-            resolved = run.resolve_tsgo({'package': 'typescript', 'tag': 'next'}, '7.1.0-dev.20261015.1')
-        self.assertEqual(['npm', 'view', '--json', 'typescript@7.1.0-dev.20261015.1'], view.call_args.args[0])
-        self.assertEqual(('7.1.0-dev.20261015.1', None), (resolved['version'], resolved['tag']))
+    def test_an_explicit_version_replaces_the_pinned_one(self):
+        self.assertEqual({'package': 'typescript', 'version': '7.1.0-dev.20261015.1'},
+                         run.tsgo_package({'tsgo': self.PINNED}, '7.1.0-dev.20261015.1'))
+        self.assertEqual(self.PINNED, run.tsgo_package({'tsgo': self.PINNED}))
+
+    def test_a_registry_failure_does_not_stop_the_run(self):
+        error = subprocess.CalledProcessError(1, ['npm'])
+        with patch.object(run.subprocess, 'run', side_effect=error):
+            self.assertEqual(dict(self.PINNED, commit=None, published=None), run.tsgo_provenance(self.PINNED))
 
     def test_reports_name_the_nightly_and_its_commit(self):
-        historical = json.loads((Path(__file__).parent / 'results/2026-10-08-6e82c526ff8e.json').read_text())
-        old = run.markdown(historical)
-        self.assertIn('## Benchmark: tsrs vs tsgo 7.0.2', old)
-        self.assertIn('- **tsgo**: npm `typescript@7.0.2`, the official Go compiler', old)
-        result = dict(historical, tsgo=dict(self.NIGHTLY, binary='~/tsc'))
+        historical = json.loads((Path(__file__).parent / 'fixtures/reporting-64-vcpu.json').read_text())
+        version = historical['tsgo']['version']
+        self.assertIn(f'- **tsgo**: npm `typescript@{version}`, the official Go compiler', run.markdown(historical))
+        result = dict(historical, tsgo=dict(self.PINNED, commit=self.COMMIT, published=self.PUBLISHED, binary='~/tsc'))
         report = run.markdown(result)
         self.assertIn('## Benchmark: tsrs vs tsgo 7.1.0-dev.20261016.1', report)
-        self.assertIn('- **tsgo**: npm `typescript@7.1.0-dev.20261016.1` (the `next` nightly, published 2026-10-16, '
-                      'from microsoft/TypeScript `abcbb2e6`), the official Go compiler', report)
+        self.assertIn('- **tsgo**: npm `typescript@7.1.0-dev.20261016.1` (published 2026-10-16, from '
+                      'microsoft/TypeScript `abcbb2e6`), the official Go compiler', report)
+        sixteen = ReportingTests()
+        sixteen.historical = result
+        self.assertIn('tsgo: npm typescript@7.1.0-dev.20261016.1 (published 2026-10-16, from microsoft/TypeScript '
+                      'abcbb2e6)', chart.svg(sixteen.resized()))
 
 
 if __name__ == '__main__':

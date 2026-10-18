@@ -18,18 +18,18 @@
    `panic = "abort"` builds (notes/fix-arena-recycle-uaf.md). Take the block as a `P<T>`, an address or a raw slice.
    No baseline: every finding fails.
 
-Scans crates/*/src/**/*.rs, without test files (*_test.rs, tests.rs, tests/ directories), the generated
-tsrs_fourslash crate, and files whose first line says they are generated.
+Scans {crates,tasks}/*/src/**/*.rs, without test files (*_test.rs, tests.rs, tests/ directories)
+and files whose first line says they are generated.
 """
 
 import os
 import re
 import sys
+from pathlib import Path
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 INVENTORY = os.path.join(ROOT, "tools", "lint", "send_sync.tsv")
 ATOMICS = os.path.join(ROOT, "tools", "lint", "atomics.tsv")
-EXCLUDE_CRATES = {"tsrs_fourslash"}
 
 SEND_SYNC = re.compile(r"\bunsafe\s+impl\b(?:\s*<(?P<generics>[^{]*?)>)?\s+(?P<trait>Send|Sync)\s+for\s+(?P<type>[^{]+?)\s*\{")
 WEAK = ("Relaxed", "Acquire", "Release", "AcqRel")
@@ -41,11 +41,9 @@ FREE_CALL = re.compile(r"\b(free!|free_slice!|free_raw|free_slice_ptr)\s*\(\s*&?
 
 
 def source_files():
-    crates = os.path.join(ROOT, "crates")
-    for crate in sorted(os.listdir(crates)):
-        src = os.path.join(crates, crate, "src")
-        if crate in EXCLUDE_CRATES or not os.path.isdir(src):
-            continue
+    sources = sorted(Path(ROOT).glob("crates/*/src")) + sorted(Path(ROOT).glob("tasks/*/src"))
+    for source in sources:
+        src = str(source)
         for dirpath, _dirs, files in os.walk(src):
             if os.sep + "tests" in dirpath[len(src):]:
                 continue

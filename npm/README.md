@@ -145,7 +145,7 @@ Wire contract the server has to speak (from the pinned `tsc/cmd/tsc/api.go`, `ts
 
 `.github/workflows/release.yml` runs on a pushed tag `v<workspace version>` or `v<npm version>` (e.g. `v0.1.0`):
 
-1. checks the tag against `Cargo.toml`, and runs `cargo check --workspace`;
+1. checks the tag against `Cargo.toml`, and runs `cargo check`;
 2. builds PGO release binaries (`release` profile, trained by `.github/scripts/pgo-train.sh`) for macOS arm64 and Linux
    x64 and arm64 GNU (`ubuntu-22.04`); on GNU, BOLT-optimizes them and runs the conformance and fourslash gates on the
    BOLT-optimized binaries (`.github/scripts/bolt.sh`); smoke-runs the native ones (`--version`, exit code 2 on a type
@@ -161,9 +161,10 @@ Wire contract the server has to speak (from the pinned `tsc/cmd/tsc/api.go`, `ts
    exact version metadata and tarball to be available on npm, including platform packages skipped on a re-run.
    Dry runs skip this check. Releases publish directly, without a staged approval step.
 
-The conformance and fourslash gates run on the GNU Linux release binaries (`bolt.sh`). The macOS binary gets only the
+The conformance and Go fourslash gates run on the GNU Linux release runners (`bolt.sh`), with Fourslash driving
+the BOLT-optimized `fourslash_server` task binary. PGO training uses the same Go harness. The macOS binary gets only the
 smoke tests; `ci.yml` (Linux) gates the source. The broader WebAssembly differential gate (`tools/wasm/gate.sh`) is
-preserved in the disabled `ci.yml.bak`; the release's WebAssembly package checks remain active.
+available locally; the release's WebAssembly package checks remain active.
 
 `workflow_dispatch` runs the same with `pnpm publish --dry-run` by default.
 
@@ -180,12 +181,12 @@ What maintainers must configure before the first release:
 - GNU binaries are built on Ubuntu 22.04, so they need glibc >= 2.35 at most (a build on Debian 12 needed 2.34).
   Musl binaries are statically linked for Alpine/musl.
 
-`.github/workflows/ci.yml` runs on pushes to main, pull requests into main, merge groups and manual dispatch. Its two
+`.github/workflows/ci.yml` runs on pushes to main, pull requests into main, merge groups and manual dispatch. Its three
 Linux jobs run Clippy/source checks and Rust checks/unit tests, build the compiler and conformance runner with the dev
-profile, and run compiler conformance in both checker modes plus regression cases.
+profile, and run compiler conformance in both checker modes and regression cases. Fourslash has its own job with
+the server framing checks, gate checks, and Go subprocess suite.
 
-Only CI, release, security and triage workflows are active. The full CI and other auxiliary workflows are disabled
-as `.github/workflows/*.yml.bak`; their local tools remain available.
+Auxiliary workflows saved as `.github/workflows/*.yml.bak` are disabled; their local tools remain available.
 
 ## Adopting it in a pnpm workspace
 
@@ -209,7 +210,8 @@ Without `--checkers`, tsrs picks its checker count per machine (tsgo always uses
 the cores, from 4 to 32; a program with fewer than 32 type-checked files per checker gets fewer, down to 4, and never
 more checkers than files. `--build` uses 4 per project; `--singleThreaded` uses one. `GOMEMLIMIT` has no effect on tsrs.
 `--extendedDiagnostics` prints the same counters as tsgo (`Memory used` is the process RSS), so scripts that parse
-them keep working.
+them keep working. Compilation timings are collected only when `--diagnostics` or `--extendedDiagnostics` is
+enabled. Pass the flag on the command line to include config-read timing.
 
 ## TODO
 

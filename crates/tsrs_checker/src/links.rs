@@ -33,7 +33,8 @@ struct LinkSlot {
 }
 
 #[cfg(target_pointer_width = "64")]
-const _: () = assert!(std::mem::size_of::<LinkSlot>() == if tsrs_core::COMPRESSED_PTRS { 8 } else { 12 });
+const _: () =
+    assert!(std::mem::size_of::<LinkSlot>() == if tsrs_core::COMPRESSED_PTRS { 8 } else { 12 });
 #[cfg(target_pointer_width = "32")]
 const _: () = assert!(std::mem::size_of::<LinkSlot>() == 8);
 
@@ -42,7 +43,13 @@ const LINK_CHUNK: usize = 1 << LINK_CHUNK_SHIFT;
 
 impl<K: 'static, V: 'static> Default for LinkStore<K, V> {
     fn default() -> Self {
-        LinkStore { slots: hashbrown::HashTable::new(), chunks: Vec::new(), len: 0, key: std::marker::PhantomData, parent: None }
+        LinkStore {
+            slots: hashbrown::HashTable::new(),
+            chunks: Vec::new(),
+            len: 0,
+            key: std::marker::PhantomData,
+            parent: None,
+        }
     }
 }
 
@@ -91,21 +98,23 @@ impl<K: 'static, V: 'static> LinkStore<K, V> {
 
     #[inline]
     pub fn has(&self, key: P<K>) -> bool {
-        self.index(key).is_some() || self.parent.filter(|_| tsrs_core::sharedgraph::COMPILED_IN).is_some_and(|p| p.has(key))
+        self.index(key).is_some()
+            || self
+                .parent
+                .filter(|_| tsrs_core::sharedgraph::COMPILED_IN)
+                .is_some_and(|p| p.has(key))
     }
 
     /// Shared graph: an empty store that reads through to `self` (frozen).
     #[must_use]
     pub fn fork(&'static self) -> Self {
-        LinkStore { slots: hashbrown::HashTable::new(), chunks: Vec::new(), len: 0, key: std::marker::PhantomData, parent: Some(self) }
-    }
-}
-
-impl<K: 'static, V: 'static> LinkStore<K, V> {
-    /// Heap census: the slot table (the values are in the arena).
-    pub fn heap_parts(&self) -> Vec<(&'static str, crate::heapcensus::HeapStat)> {
-        use crate::heapcensus::HeapSize;
-        vec![("slots", self.slots.heap_stat()), ("chunk list", self.chunks.heap_stat())]
+        LinkStore {
+            slots: hashbrown::HashTable::new(),
+            chunks: Vec::new(),
+            len: 0,
+            key: std::marker::PhantomData,
+            parent: Some(self),
+        }
     }
 }
 
@@ -128,12 +137,19 @@ impl<K: 'static, V: Default + LinkCopy + 'static> LinkStore<K, V> {
     fn create(&mut self, key: PKey) -> P<V> {
         crate::sitecount::hit("links", std::any::type_name::<V>());
         let index = self.len;
-        self.slots.insert_unique(Self::hash(key), LinkSlot { key, index }, |slot| Self::hash(slot.key));
+        self.slots
+            .insert_unique(Self::hash(key), LinkSlot { key, index }, |slot| Self::hash(slot.key));
         if (index as usize).is_multiple_of(LINK_CHUNK) {
-            self.chunks.push(PSlot::first(alloc_vec(std::iter::repeat_with(|| PSlot(V::default())).take(LINK_CHUNK).collect())));
+            self.chunks.push(PSlot::first(alloc_vec(
+                std::iter::repeat_with(|| PSlot(V::default())).take(LINK_CHUNK).collect(),
+            )));
         }
         self.len += 1;
-        if let Some(frozen) = self.parent.filter(|_| tsrs_core::sharedgraph::COMPILED_IN).and_then(|p| p.index_by_pkey(key).map(|i| p.at(i))) {
+        if let Some(frozen) = self
+            .parent
+            .filter(|_| tsrs_core::sharedgraph::COMPILED_IN)
+            .and_then(|p| p.index_by_pkey(key).map(|i| p.at(i)))
+        {
             self.at(index).copy_link_from(&frozen);
         }
         self.at(index)
@@ -156,7 +172,13 @@ pub unsafe fn copy_cells_bitwise<V>(dst: &V, src: &V) {
     const { assert!(!std::mem::needs_drop::<V>()) };
     // SAFETY: the caller's contract: every byte of `V` is inside a `Cell`, so writing through `dst` is a `Cell` write;
     // `src` and `dst` are distinct records (the frozen seed's and this checker's).
-    unsafe { std::ptr::copy_nonoverlapping(std::ptr::from_ref(src).cast::<u8>(), std::ptr::from_ref(dst).cast::<u8>().cast_mut(), std::mem::size_of::<V>()) };
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            std::ptr::from_ref(src).cast::<u8>(),
+            std::ptr::from_ref(dst).cast::<u8>().cast_mut(),
+            std::mem::size_of::<V>(),
+        );
+    };
 }
 
 #[macro_export]
@@ -207,7 +229,13 @@ pub struct KeyedLinkStore<K: 'static, V: 'static> {
 
 impl<K: 'static, V: 'static> Default for KeyedLinkStore<K, V> {
     fn default() -> Self {
-        KeyedLinkStore { slots: hashbrown::HashTable::new(), chunks: Vec::new(), len: 0, key: std::marker::PhantomData, parent: None }
+        KeyedLinkStore {
+            slots: hashbrown::HashTable::new(),
+            chunks: Vec::new(),
+            len: 0,
+            key: std::marker::PhantomData,
+            parent: None,
+        }
     }
 }
 
@@ -215,7 +243,10 @@ impl<K: 'static, V: 'static> Default for KeyedLinkStore<K, V> {
 /// chunks while the table is borrowed mutably).
 #[inline]
 fn keyed_at<V>(chunks: &[P<PSlot<V>>], index: u32) -> P<V> {
-    #[expect(clippy::disallowed_methods, reason = "measured with the other link-store lookups (see LinkStore::at)")]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "measured with the other link-store lookups (see LinkStore::at)"
+    )]
     // SAFETY: every stored index is below the store's `len`, and `chunks` holds `LINK_CHUNK` values per started chunk.
     let chunk = unsafe { *chunks.get_unchecked((index >> LINK_CHUNK_SHIFT) as usize) };
     // SAFETY: `chunk` is the first slot of a `LINK_CHUNK`-slot array, and the offset is below `LINK_CHUNK`.
@@ -237,7 +268,11 @@ impl<K: 'static, V: KeyedLinks + 'static> KeyedLinkStore<K, V> {
     #[inline]
     fn try_get_pkey(&self, key: PKey) -> Option<P<V>> {
         let chunks = &self.chunks;
-        match self.slots.find(Self::hash(key), |&i| keyed_at(chunks, i).link_key().get() == key).map(|&i| keyed_at(chunks, i)) {
+        match self
+            .slots
+            .find(Self::hash(key), |&i| keyed_at(chunks, i).link_key().get() == key)
+            .map(|&i| keyed_at(chunks, i))
+        {
             Some(v) => Some(v),
             None => self.parent.filter(|_| tsrs_core::sharedgraph::COMPILED_IN)?.try_get_pkey(key),
         }
@@ -246,18 +281,18 @@ impl<K: 'static, V: KeyedLinks + 'static> KeyedLinkStore<K, V> {
     /// Shared graph: an empty store that reads through to `self` (frozen).
     #[must_use]
     pub fn fork(&'static self) -> Self {
-        KeyedLinkStore { slots: hashbrown::HashTable::new(), chunks: Vec::new(), len: 0, key: std::marker::PhantomData, parent: Some(self) }
+        KeyedLinkStore {
+            slots: hashbrown::HashTable::new(),
+            chunks: Vec::new(),
+            len: 0,
+            key: std::marker::PhantomData,
+            parent: Some(self),
+        }
     }
 
     #[inline]
     pub fn has(&self, key: P<K>) -> bool {
         self.try_get(key).is_some()
-    }
-
-    /// Heap census: the table of indexes (the values are in the arena).
-    pub fn heap_parts(&self) -> Vec<(&'static str, crate::heapcensus::HeapStat)> {
-        use crate::heapcensus::HeapSize;
-        vec![("index slots", self.slots.heap_stat()), ("chunk list", self.chunks.heap_stat())]
     }
 }
 
@@ -281,16 +316,24 @@ impl<K: 'static, V: KeyedLinks + Default + LinkCopy + 'static> KeyedLinkStore<K,
         crate::sitecount::hit("links", std::any::type_name::<V>());
         let index = self.len;
         if (index as usize).is_multiple_of(LINK_CHUNK) {
-            self.chunks.push(PSlot::first(alloc_vec(std::iter::repeat_with(|| PSlot(V::default())).take(LINK_CHUNK).collect())));
+            self.chunks.push(PSlot::first(alloc_vec(
+                std::iter::repeat_with(|| PSlot(V::default())).take(LINK_CHUNK).collect(),
+            )));
         }
         self.len += 1;
         let value = keyed_at(&self.chunks, index);
-        if let Some(frozen) = self.parent.filter(|_| tsrs_core::sharedgraph::COMPILED_IN).and_then(|p| p.try_get_pkey(key)) {
+        if let Some(frozen) = self
+            .parent
+            .filter(|_| tsrs_core::sharedgraph::COMPILED_IN)
+            .and_then(|p| p.try_get_pkey(key))
+        {
             value.copy_link_from(&frozen);
         }
         value.link_key().set(key);
         let chunks = &self.chunks;
-        self.slots.insert_unique(Self::hash(key), index, |&i| Self::hash(keyed_at(chunks, i).link_key().get()));
+        self.slots.insert_unique(Self::hash(key), index, |&i| {
+            Self::hash(keyed_at(chunks, i).link_key().get())
+        });
         value
     }
 }
@@ -324,7 +367,9 @@ struct ReferenceKindsSlot {
 }
 
 #[cfg(target_pointer_width = "64")]
-const _: () = assert!(std::mem::size_of::<ReferenceKindsSlot>() == if tsrs_core::COMPRESSED_PTRS { 8 } else { 16 });
+const _: () = assert!(
+    std::mem::size_of::<ReferenceKindsSlot>() == if tsrs_core::COMPRESSED_PTRS { 8 } else { 16 }
+);
 #[cfg(target_pointer_width = "32")]
 const _: () = assert!(std::mem::size_of::<ReferenceKindsSlot>() == 8);
 
@@ -340,7 +385,8 @@ impl SymbolReferenceLinkStore {
     #[cfg_attr(feature = "site-counts", track_caller)]
     pub fn add_reference_kinds(&mut self, symbol: P<Symbol>, meaning: SymbolFlags) {
         let key = symbol.key();
-        let slot = match self.slots.entry(Self::hash(key), |s| s.key == key, |s| Self::hash(s.key)) {
+        let slot = match self.slots.entry(Self::hash(key), |s| s.key == key, |s| Self::hash(s.key))
+        {
             hashbrown::hash_table::Entry::Occupied(slot) => slot.into_mut(),
             hashbrown::hash_table::Entry::Vacant(slot) => {
                 crate::sitecount::hit("links", "SymbolReferenceLinks");
@@ -356,12 +402,6 @@ impl SymbolReferenceLinkStore {
     pub fn reference_kinds(&self, symbol: P<Symbol>) -> SymbolFlags {
         let key = symbol.key();
         self.slots.find(Self::hash(key), |s| s.key == key).map_or(SymbolFlags::None, |s| s.kinds)
-    }
-
-    /// Heap census: the slots (key and flags; nothing in the arena).
-    pub fn heap_parts(&self) -> Vec<(&'static str, crate::heapcensus::HeapStat)> {
-        use crate::heapcensus::HeapSize;
-        vec![("slots (key, kinds)", self.slots.heap_stat())]
     }
 }
 
@@ -401,7 +441,8 @@ struct IdGroup {
 }
 
 #[cfg(target_pointer_width = "64")]
-const _: () = assert!(std::mem::size_of::<IdGroup>() == if tsrs_core::COMPRESSED_PTRS { 264 } else { 272 });
+const _: () =
+    assert!(std::mem::size_of::<IdGroup>() == if tsrs_core::COMPRESSED_PTRS { 264 } else { 272 });
 #[cfg(target_pointer_width = "32")]
 const _: () = assert!(std::mem::size_of::<IdGroup>() == 264);
 
@@ -421,7 +462,13 @@ const ID_GROUP: usize = 1 << ID_GROUP_SHIFT;
 
 impl<V: 'static> Default for IdLinkStore<V> {
     fn default() -> Self {
-        IdLinkStore { index: Vec::new(), wide_slots: FxHashMap::default(), chunks: Vec::new(), len: 0, parent: None }
+        IdLinkStore {
+            index: Vec::new(),
+            wide_slots: FxHashMap::default(),
+            chunks: Vec::new(),
+            len: 0,
+            parent: None,
+        }
     }
 }
 
@@ -429,9 +476,17 @@ impl<V: 'static> IdLinkStore<V> {
     #[inline]
     fn at(&self, slot: u32) -> P<V> {
         debug_assert!(slot < self.len);
-        #[expect(clippy::disallowed_methods, reason = "measured with the other link-store lookups (see LinkStore::at)")]
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "measured with the other link-store lookups (see LinkStore::at)"
+        )]
         // SAFETY: every stored slot is below `len`; chunks hold `ID_LINK_CHUNK` values per started chunk.
-        unsafe { PSlot::nth(*self.chunks.get_unchecked((slot >> ID_LINK_CHUNK_SHIFT) as usize), slot as usize & (ID_LINK_CHUNK - 1)) }
+        unsafe {
+            PSlot::nth(
+                *self.chunks.get_unchecked((slot >> ID_LINK_CHUNK_SHIFT) as usize),
+                slot as usize & (ID_LINK_CHUNK - 1),
+            )
+        }
     }
 
     #[inline]
@@ -480,43 +535,23 @@ impl<V: 'static> IdLinkStore<V> {
 
     #[inline]
     pub fn has(&self, id: u64) -> bool {
-        self.slot(id).is_some() || self.parent.filter(|_| tsrs_core::sharedgraph::COMPILED_IN).is_some_and(|p| p.has(id))
+        self.slot(id).is_some()
+            || self
+                .parent
+                .filter(|_| tsrs_core::sharedgraph::COMPILED_IN)
+                .is_some_and(|p| p.has(id))
     }
 
     /// Shared graph: an empty store that reads through to `self` (frozen).
     #[must_use]
     pub fn fork(&'static self) -> Self {
-        IdLinkStore { index: Vec::new(), wide_slots: FxHashMap::default(), chunks: Vec::new(), len: 0, parent: Some(self) }
-    }
-}
-
-impl<V: 'static> IdLinkStore<V> {
-    /// Heap census: the group index and the wide-id map (the groups and the values are in the arena; the groups are
-    /// reported with their arena bytes so that the id-to-slot cost stays visible).
-    pub fn heap_parts(&self) -> Vec<(&'static str, crate::heapcensus::HeapStat)> {
-        use crate::heapcensus::{HeapSize, HeapStat};
-        let mut narrow = HeapStat { slot: 2, ..HeapStat::default() };
-        let mut dense = HeapStat { slot: 4, ..HeapStat::default() };
-        for group in self.index.iter().flatten() {
-            narrow.containers += 1;
-            narrow.cap += ID_GROUP as u64;
-            narrow.bytes += std::mem::size_of::<IdGroup>() as u64;
-            if let Some(d) = group.dense.get() {
-                dense.containers += 1;
-                dense.cap += ID_GROUP as u64;
-                dense.bytes += std::mem::size_of::<[Cell<u32>; ID_GROUP]>() as u64;
-                dense.len += d.iter().filter(|s| s.get() != 0).count() as u64;
-            } else {
-                narrow.len += group.slots.iter().filter(|s| s.get() != 0).count() as u64;
-            }
+        IdLinkStore {
+            index: Vec::new(),
+            wide_slots: FxHashMap::default(),
+            chunks: Vec::new(),
+            len: 0,
+            parent: Some(self),
         }
-        vec![
-            ("group index", self.index.heap_stat()),
-            ("narrow groups (arena)", narrow),
-            ("dense groups (arena)", dense),
-            ("wide ids", self.wide_slots.heap_stat()),
-            ("chunk list", self.chunks.heap_stat()),
-        ]
     }
 }
 
@@ -536,7 +571,9 @@ impl<V: Default + LinkCopy + 'static> IdLinkStore<V> {
         crate::sitecount::hit("links", std::any::type_name::<V>());
         let slot = self.len;
         if (slot as usize).is_multiple_of(ID_LINK_CHUNK) {
-            self.chunks.push(PSlot::first(alloc_vec(std::iter::repeat_with(|| PSlot(V::default())).take(ID_LINK_CHUNK).collect())));
+            self.chunks.push(PSlot::first(alloc_vec(
+                std::iter::repeat_with(|| PSlot(V::default())).take(ID_LINK_CHUNK).collect(),
+            )));
         }
         self.len += 1;
         if u32::try_from(id).is_ok() {
@@ -552,7 +589,11 @@ impl<V: Default + LinkCopy + 'static> IdLinkStore<V> {
             }
             let i = id as usize & (ID_GROUP - 1);
             let group = *self.index[group_index].get_or_insert_with(|| {
-                P::new(IdGroup { before: slot.wrapping_sub(1), dense: Cell::new(None), slots: [const { Cell::new(0) }; ID_GROUP] })
+                P::new(IdGroup {
+                    before: slot.wrapping_sub(1),
+                    dense: Cell::new(None),
+                    slots: [const { Cell::new(0) }; ID_GROUP],
+                })
             });
             if let Some(dense) = group.dense.get() {
                 dense[i].set(slot + 1);
@@ -574,7 +615,9 @@ impl<V: Default + LinkCopy + 'static> IdLinkStore<V> {
         } else {
             self.wide_slots.insert(id, slot);
         }
-        if let Some(frozen) = self.parent.filter(|_| tsrs_core::sharedgraph::COMPILED_IN).and_then(|p| p.try_get(id)) {
+        if let Some(frozen) =
+            self.parent.filter(|_| tsrs_core::sharedgraph::COMPILED_IN).and_then(|p| p.try_get(id))
+        {
             self.at(slot).copy_link_from(&frozen);
         }
         self.at(slot)
@@ -626,7 +669,8 @@ impl<V: 'static> InlineIdStore<V> {
     #[inline]
     fn narrow(&self, id: u32) -> Option<&'static V> {
         let block = (*self.blocks.get((id >> INLINE_BLOCK_SHIFT) as usize)?)?;
-        let group = block.get()[(id >> INLINE_GROUP_SHIFT) as usize & (INLINE_BLOCK_GROUPS - 1)].get()?;
+        let group =
+            block.get()[(id >> INLINE_GROUP_SHIFT) as usize & (INLINE_BLOCK_GROUPS - 1)].get()?;
         Some(&group.get()[id as usize & (INLINE_GROUP - 1)])
     }
 
@@ -654,32 +698,6 @@ impl<V: 'static> InlineIdStore<V> {
     fn wide_get(&self, id: u64) -> Option<&'static V> {
         self.wide.get(&id).map(|v| v.get())
     }
-
-    /// Heap census: the block index (the tables and groups are in the arena; reported with their arena bytes so that
-    /// the id-to-value cost stays visible).
-    pub fn heap_parts(&self) -> Vec<(&'static str, crate::heapcensus::HeapStat)> {
-        use crate::heapcensus::{HeapSize, HeapStat};
-        let mut tables = HeapStat { slot: 4, ..HeapStat::default() };
-        let mut groups = HeapStat { slot: std::mem::size_of::<V>() as u64, ..HeapStat::default() };
-        for block in self.blocks.iter().flatten() {
-            tables.containers += 1;
-            tables.cap += INLINE_BLOCK_GROUPS as u64;
-            tables.bytes += std::mem::size_of::<InlineBlock<V>>() as u64;
-            for group in block.get().iter().filter_map(std::cell::Cell::get) {
-                tables.len += 1;
-                groups.containers += 1;
-                groups.len += INLINE_GROUP as u64;
-                groups.cap += INLINE_GROUP as u64;
-                groups.bytes += std::mem::size_of_val(group.get()) as u64;
-            }
-        }
-        vec![
-            ("block index", self.blocks.heap_stat()),
-            ("block tables (arena)", tables),
-            ("value groups (arena)", groups),
-            ("wide ids", self.wide.heap_stat()),
-        ]
-    }
 }
 
 impl<V: Default + LinkCopy + 'static> InlineIdStore<V> {
@@ -706,7 +724,10 @@ impl<V: Default + LinkCopy + 'static> InlineIdStore<V> {
                 .entry(id)
                 .or_insert_with(|| {
                     let v = P::new(V::default());
-                    if let Some(frozen) = parent.filter(|_| tsrs_core::sharedgraph::COMPILED_IN).and_then(|p| p.wide_get(id)) {
+                    if let Some(frozen) = parent
+                        .filter(|_| tsrs_core::sharedgraph::COMPILED_IN)
+                        .and_then(|p| p.wide_get(id))
+                    {
                         v.copy_link_from(frozen);
                     }
                     v
@@ -723,16 +744,20 @@ impl<V: Default + LinkCopy + 'static> InlineIdStore<V> {
             }
             self.blocks.resize(need, None);
         }
-        let block = *self.blocks[b].get_or_insert_with(|| P::new(std::array::from_fn(|_| Cell::new(None))));
+        let block =
+            *self.blocks[b].get_or_insert_with(|| P::new(std::array::from_fn(|_| Cell::new(None))));
         let cell = &block.get()[(id >> INLINE_GROUP_SHIFT) as usize & (INLINE_BLOCK_GROUPS - 1)];
-        let group = if let Some(group) = cell.get() { group } else {
+        let group = if let Some(group) = cell.get() {
+            group
+        } else {
             let group: P<InlineGroup<V>> = P::new(std::array::from_fn(|_| V::default()));
             if let Some(p) = self.parent.filter(|_| tsrs_core::sharedgraph::COMPILED_IN) {
                 let first = id & !(INLINE_GROUP as u32 - 1);
                 if let Some(frozen) = p.narrow(first) {
                     let frozen_group: &'static [V] = std::slice::from_ref(frozen);
                     // SAFETY: `frozen` is the first value of the parent's group array of INLINE_GROUP values.
-                    let frozen_group = unsafe { std::slice::from_raw_parts(frozen_group.as_ptr(), INLINE_GROUP) };
+                    let frozen_group =
+                        unsafe { std::slice::from_raw_parts(frozen_group.as_ptr(), INLINE_GROUP) };
                     for (dst, src) in group.get().iter().zip(frozen_group) {
                         dst.copy_link_from(src);
                     }
@@ -779,10 +804,6 @@ impl<V: Default + LinkCopy + 'static> NodeLinkStore<V> {
 }
 
 impl<V: 'static> NodeLinkStore<V> {
-    pub fn heap_parts(&self) -> Vec<(&'static str, crate::heapcensus::HeapStat)> {
-        self.store.heap_parts()
-    }
-
     /// `None` if no id of the node's group of 32 has links yet; otherwise the node's value, unset if the node itself
     /// never had links (`InlineIdStore`). Assigns the node an id, as Go's `TryGet` does.
     #[inline]
@@ -833,10 +854,6 @@ impl<V: Default + LinkCopy + 'static> SymbolArenaLinkStore<V> {
 }
 
 impl<V: 'static> SymbolArenaLinkStore<V> {
-    pub fn heap_parts(&self) -> Vec<(&'static str, crate::heapcensus::HeapStat)> {
-        self.store.heap_parts()
-    }
-
     #[inline]
     pub fn try_get(&self, symbol: P<Symbol>) -> Option<P<V>> {
         self.store.try_get(ast::get_symbol_id(symbol).0)
@@ -849,7 +866,11 @@ impl<V: 'static> SymbolArenaLinkStore<V> {
         let id = ast::get_assigned_symbol_id(symbol)?;
         match self.store.narrow_slot(id) {
             Some(slot) => Some(self.store.at(slot)),
-            None => self.store.parent.filter(|_| tsrs_core::sharedgraph::COMPILED_IN)?.try_get(id as u64),
+            None => self
+                .store
+                .parent
+                .filter(|_| tsrs_core::sharedgraph::COMPILED_IN)?
+                .try_get(id as u64),
         }
     }
 
@@ -900,7 +921,22 @@ mod tests {
     fn inline_ids_reach_their_own_stable_cells() {
         let mut store: InlineIdStore<Cell<u32>> = InlineIdStore::default();
         let mut ids: Vec<u64> = (0..4000u64).map(|i| (i * 7919) % 300_000).collect();
-        ids.extend([0, 1, 31, 32, 33, 1023, 1024, 1025, 65_535, 65_536, 65_537, (1 << 20) - 1, 1 << 20, (1 << 24) + 5]);
+        ids.extend([
+            0,
+            1,
+            31,
+            32,
+            33,
+            1023,
+            1024,
+            1025,
+            65_535,
+            65_536,
+            65_537,
+            (1 << 20) - 1,
+            1 << 20,
+            (1 << 24) + 5,
+        ]);
         let ids = scrambled(ids, 12345);
         let mut expected: FxHashMap<u64, u32> = FxHashMap::default();
         let mut held: Vec<(u64, *const Cell<u32>)> = Vec::new();
@@ -916,7 +952,11 @@ mod tests {
             assert!(std::ptr::eq(store.get(id), address), "id {id} moved");
         }
         for id in (0..300_000u64).chain([(1 << 20) - 1, 1 << 20, (1 << 24) + 5]) {
-            assert_eq!(store.try_get(id).map_or(0, std::cell::Cell::get), expected.get(&id).copied().unwrap_or(0), "id {id}");
+            assert_eq!(
+                store.try_get(id).map_or(0, std::cell::Cell::get),
+                expected.get(&id).copied().unwrap_or(0),
+                "id {id}"
+            );
         }
         assert!(store.try_get(5_000_000).is_none());
         assert!(store.try_get((1 << 24) + 64).is_none()); // same block as (1 << 24) + 5, another group
@@ -934,8 +974,16 @@ mod tests {
             store.get(b * 1024 + b % 1024).set(b as u32 + 1);
         }
         for b in 0..3000u64 {
-            assert_eq!(store.try_get(b * 1024 + b % 1024).map(std::cell::Cell::get), Some(b as u32 + 1), "block {b}");
-            assert_eq!(store.try_get(b * 1024 + (b + 32) % 1024).map(std::cell::Cell::get), None, "block {b}");
+            assert_eq!(
+                store.try_get(b * 1024 + b % 1024).map(std::cell::Cell::get),
+                Some(b as u32 + 1),
+                "block {b}"
+            );
+            assert_eq!(
+                store.try_get(b * 1024 + (b + 32) % 1024).map(std::cell::Cell::get),
+                None,
+                "block {b}"
+            );
         }
     }
 
@@ -986,7 +1034,8 @@ mod tests {
     // never referenced must read as `None` without getting a record.
     #[test]
     fn reference_kinds_accumulate_in_their_slots() {
-        let symbols: Vec<P<Symbol>> = std::iter::repeat_with(|| P::new(Symbol::default())).take(20000).collect();
+        let symbols: Vec<P<Symbol>> =
+            std::iter::repeat_with(|| P::new(Symbol::default())).take(20000).collect();
         let mut store = SymbolReferenceLinkStore::default();
         for (i, &symbol) in symbols.iter().enumerate().filter(|(i, _)| i % 3 != 0) {
             store.add_reference_kinds(symbol, SymbolFlags::Value);
@@ -1025,7 +1074,11 @@ mod tests {
             }
         }
         for id in 0..40_000u64 {
-            assert_eq!(store.try_get(id).map(|v| (*v).get()), expected.get(&id).copied(), "id {id}");
+            assert_eq!(
+                store.try_get(id).map(|v| (*v).get()),
+                expected.get(&id).copied(),
+                "id {id}"
+            );
         }
         assert_eq!(store.try_get(1 << 40), None);
         store.get(1 << 40).set(7);

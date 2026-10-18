@@ -48,7 +48,7 @@ The compiler version is pinned to the repository;
 
 ## Verification
 
-Build the native reference with `cargo build --profile dev -p tsrs_cli -p tsrs_testrunner` from the repository root.
+Build the native reference with `cargo build --profile dev -p tsrs_cli` from the repository root.
 Then, from `playground/`:
 
 ```sh
@@ -64,6 +64,46 @@ vp run test:browser
 Chromium executable. The browser checks use the production build; integration checks compare diagnostics and emitted
 file bytes against native tsrs. The Vite build rejects a bundled JavaScript TypeScript compiler or language-service worker.
 It also verifies the vendored website's visual source against the pinned upstream SHA-256 manifest.
+
+Set `PLAYWRIGHT_BASE_URL=https://tsrs-playground.void.app` to run the same browser checks against the hosted site
+without starting a local preview server. Hosted checks allow longer timeouts for network loading.
+
+## Deployment
+
+[The playground](https://tsrs-playground.void.app) is a static site on Void Cloud. The
+[Playground workflow](../.github/workflows/void-deploy.yml) runs only when the
+[Release workflow](../.github/workflows/release.yml) calls it after publishing the GitHub release from
+`oxc-project/tsrs`'s `main`. It runs the native/WASM comparison and production browser checks before deploying.
+Pull requests, dry runs and skipped releases do not deploy.
+Production deployments are serialized; there is no separate manual trigger or preview deployment.
+Void's OIDC service requires the release commit to remain the current `main` head.
+
+The deploy job uploads the exact validated build artifact using the repo's locked Void CLI, then runs the browser checks
+against the hosted URL. GitHub OIDC grants a short-lived project-scoped token; no `VOID_TOKEN` secret is needed.
+The platform URL and project slug are public workflow configuration. Dependencies and the compiler are built in
+the validation job, which has no deployment permission.
+
+For the initial setup, build and verify the site as above, then run these commands from the repository root:
+
+```sh
+vp exec void connect https://api.void.cloud
+vp exec void deploy --platform void --project tsrs-playground --dir playground/dist
+vp exec void github install
+vp exec void github connect tsrs-playground \
+  --repo oxc-project/tsrs --branch main --executor github_actions \
+  --workflow .github/workflows/void-deploy.yml
+vp exec void github status tsrs-playground
+```
+
+The first deployment creates the project (with confirmation in an interactive terminal). GitHub App installation
+needs repository access; use `github join` for an existing shared installation, or ask the repository owner to install
+it. The OIDC connection must authorize exactly the repository, branch, and workflow above before the workflow lands. Local
+connection state under `.void/` is ignored by git; fresh CI runners connect with `--no-login` before deployment.
+
+Inspect deployments with `vp exec void project status tsrs-playground`. To restore a previous deployment,
+run `vp exec void project rollback <deployId>` from the linked checkout. A hosted browser-check failure marks
+the workflow failed after publication; inspect the failure and roll back if needed. Fix the underlying problem
+before the next release, which deploys again automatically.
 
 ## Upstream and licensing
 

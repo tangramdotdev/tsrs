@@ -22,14 +22,15 @@ The Go implementation at the commit in `Cargo.toml` (`[workspace.metadata.typesc
 ## Build
 
 Requirements: rustup (it installs the Rust version `rust-toolchain.toml` pins), Node.js 24 (`.node-version`), pnpm 12.10.1 (for `npm/build.mjs` and the JS tooling) and git.
+The Fourslash suite also needs Python 3.12+ and Go with `GOTOOLCHAIN=auto` to select the pinned reference's version.
 Run `pnpm install --frozen-lockfile` from the repository root to install the npm workspace tooling.
 
 ```sh
 cargo build --profile dev -p tsrs_cli -p tsrs_testrunner
 ./target/debug/tsrs -p path/to/project             # like `tsc` (emits; add --noEmit to only type check)
-cargo check --workspace                           # must be 0 errors, 0 warnings (CI sets build.warnings=deny)
+cargo check                                      # must be 0 errors, 0 warnings (CI sets build.warnings=deny)
 cargo check -p tsrs_wasm --target wasm32-wasip1   # the WebAssembly build still compiles (notes/wasm-build.md)
-cargo clippy --workspace --locked --all-targets --config 'build.warnings="deny"' -- -D dead-code
+cargo clippy --all-targets --config 'build.warnings="deny"'
 tools/lint/source.py                              # unsafe Send/Sync inventory, comments on weakened atomic orderings
 tools/gen-check.sh                                # generated code matches its generator (change the generator, then --write)
 ```
@@ -39,31 +40,33 @@ Use the `dev` profile (release optimization, no LTO, incremental) while editing 
 same results in the same time (notes/dev-loop-build.md). Build `--release` for performance measurements: its fat LTO
 and single codegen unit are what ships.
 
-The language-server test runner and WebAssembly module have separate builds:
+The language-server test server and WebAssembly module have separate builds:
 
 ```sh
-cargo build --profile dev -p tsrs_fourslash
+cargo build --profile dev -p tsrs_fourslash_server
 tools/wasm/build.sh  # requires the wasm32-wasip1 target and wasm-opt
 ```
 
 ## Run the tests
 
-The conformance suite reads the reference baselines from a checkout of microsoft/TypeScript at the pinned commit in
-`ts-ref/` (git-ignored):
+The conformance suite and workspace tests use fixtures, API clients and the AST schema from a checkout of
+microsoft/TypeScript at the pinned commit in `ts-ref/` (git-ignored):
 
 ```sh
 commit=$(node npm/build.mjs --print-typescript-commit)
 git clone --filter=blob:none --sparse https://github.com/microsoft/TypeScript ts-ref
-git -C ts-ref sparse-checkout set tsc/testdata && git -C ts-ref checkout "$commit"
+git -C ts-ref sparse-checkout set tsc packages/typescript/src \
+  packages/typescript/lib packages/typescript/vendor tools/scripts/tsc
+git -C ts-ref checkout "$commit"
 
 ./target/debug/tsrs-test run --suite all                          # summary table; lists in target/test-results/
 ./target/debug/tsrs-test run --filter <substring>                 # one test or a cluster
 ./target/debug/tsrs-test show <suite/name>                        # expected vs actual
 ./target/debug/tsrs-test run --suite all --baselines types,symbols # type and symbol baselines
-./target/debug/tsrs-fourslash run                                # language-server suite
+PYTHON=python3.12 .github/scripts/go-fourslash-gate.sh             # language-server suite (Go assertions, Rust LSP)
 TSRS_TEST=target/debug/tsrs-test .github/scripts/conformance-gate.sh # what CI enforces: errors, .types, .symbols
 tools/regressions.sh target/debug/tsrs                            # testdata/regressions (CI runs it too)
-cargo test -p tsrs_core -p tsrs_scanner -p tsrs_cli              # unit and CLI tests (see .github/workflows/ci.yml)
+cargo test --locked                                             # all workspace unit and integration tests (CI)
 ```
 
 CI runs the gate twice: in tsgo's check history, which the baselines need, and in the default mode
@@ -81,13 +84,19 @@ For a bug outside the suite, add a reproduction under `testdata/regressions/<nam
 ## Landing changes
 
 - Changes target `main`. CI (`.github/workflows/ci.yml`, on GitHub Actions) runs on pushes
-  to `main`, on pull requests into `main` (drafts too), on merge groups and by manual dispatch, and must pass. Fork pull requests
+  to `main`, on pull requests (drafts too), on merge groups and by manual dispatch, and must pass. Fork pull requests
   follow the repository's approval setting, run with read-only tokens and never get repository secrets.
-- Only CI, release, security and triage workflows are active. CI has two Linux jobs: `lint` runs Clippy and source checks; `test`
-  runs Rust checks and unit tests, compiler conformance in both checker modes, and regressions.
-  The full CI and other workflow definitions are preserved as `.github/workflows/*.yml.bak`; they do not run
+- CI has three independent Linux jobs with separate
+  Rust caches: `lint` runs Clippy and source checks; `test` runs Rust checks and all workspace tests, compiler conformance in
+  both checker modes, and regressions; `fourslash` runs the server framing checks, gate checks, and
+  [Go fourslash subprocess gate](tools/go-fourslash/README.md#ci-gate).
+  Source checks overlap Rust setup and Clippy in `lint`. Setup and checkout actions in `test` and `fourslash`
+  run sequentially: the runner rewrites the shared GitHub event file when starting steps, so parallel actions
+  can read an incomplete payload.
+  Autofix removes unused Cargo dependencies and updates the lock file on pull requests; merge groups reject pending fixes.
+  Auxiliary workflow definitions preserved as `.github/workflows/*.yml.bak` do not run
   automatically or by manual dispatch. Restore the original `.yml` filename to re-enable one.
-- Maintainers land small commits directly on `main` (rebase onto `origin/main`, `cargo check --workspace`, re-run the
+- Maintainers land small commits directly on `main` (rebase onto `origin/main`, `cargo check`, re-run the
   affected tests and the full suite, then `git push origin HEAD:main`; never force-push). See `docs/DEBUGGING.md`.
 - Commit messages: `<area>: <what and why>`, plus the conformance totals when they change.
 - Contributions are licensed under Apache-2.0 (`LICENSE`, section 5).

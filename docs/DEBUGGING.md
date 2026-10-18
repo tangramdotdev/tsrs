@@ -25,8 +25,8 @@ Land small, often — every coherent fix, not one big drop at the end:
 ```sh
 git add -A . && git commit -m "<area>: <what and why>"
 git fetch -q origin main && git rebase origin/main        # resolve conflicts if any, keep both sides' intent
-CARGO_TARGET_DIR=$PWD/target cargo check --workspace      # must be 0 errors, 0 warnings after the rebase
-cargo clippy --workspace --locked --all-targets --config 'build.warnings="deny"' -- -D dead-code
+CARGO_TARGET_DIR=$PWD/target cargo check                  # must be 0 errors, 0 warnings after the rebase
+cargo clippy --all-targets --config 'build.warnings="deny"'
 # re-run the tests you touched, and before every push a full-suite run to check for regressions (see below)
 git push -q origin HEAD:main                              # if rejected: fetch, rebase, check, push again
 ```
@@ -81,7 +81,7 @@ Each checker begins the type-check pass with the files of its queue whose static
 checker's share, heaviest first, then the rest in program order (notes/perf-checker-64.md,
 notes/perf-heavy-first-threshold.md); `TSRS_HEAVY_SHARE_DIVISOR=<n>` changes the divisor for experiments.
 `--checkerCostCache <file>` (opt-in, locality only) balances the checkers on the previous run's per-file CPU times
-(notes/perf-balance.md); `TSRS_ASSIGNMENT_STATS=times` prints per-checker wall and CPU seconds.
+(notes/perf-balance.md).
 From 16 checkers on, the locality placement also counts the modules (files and their imports, library declaration
 files included) a group shares with each checker, then moves groups while that lowers the modules held per checker
 (notes/perf-clustered-assignment.md); `TSRS_MODULE_AFFINITY=off` restores the placement by import edges alone, and
@@ -206,13 +206,6 @@ object graph for all references to freed memory.
 The `alloc-profile` feature, heap sampler and reachability census have been removed. Older measurements in the
 [engineering notes](../notes/README.md) describe the instrumentation available at the recorded revision.
 
-## What each checker holds on the heap: the heap census
-
-`TSRS_HEAP_CENSUS=1` with `--extendedDiagnostics` prints, per checker on stderr, every hash table and vector the
-checker owns directly (cache maps, relation caches, link stores, lazy member tables, ...) with entries, capacity,
-bytes per slot, load factor and heap bytes (`crates/tsrs_checker/src/heapcensus.rs`, notes/mem-checker-heap.md).
-`TSRS_HEAP_CENSUS_MIN=<bytes>` sets the smallest row (default 1 MiB). It works in any build.
-
 ## What the resident memory is: the memory split
 
 `TSRS_MEM_SPLIT=1` (any build) prints on stderr, at `parse end`, at `check end` (every checker of the type-check pass
@@ -237,7 +230,6 @@ performance measurements). Features live on the crate that controls the instrume
 | Creation-site counters | `-p tsrs_checker --features tsrs_checker/site-counts` |
 | Checker work census | `-p tsrs_checker --features tsrs_checker/work-census` |
 | AST sizing | `--features tsrs_ast/ast-sizing` |
-| Checker assignment statistics | `-p tsrs_checker --features tsrs_checker/assignment-stats` |
 | Shared checker graph | `--features tsrs_core/shared-graph` |
 
 The CLI and compiler aliases for these features have been removed. Creation-site counters also live entirely in
@@ -275,6 +267,13 @@ the type. Use one checker: with several, each checker's spans are merged and wal
 about 18% instructions; its span cost is calibrated and subtracted, but patterns made of many short spans (unions,
 relations, indexed access) still read a little high.
 
+## Compilation statistics
+
+Compilation timings are collected only when `--diagnostics` or `--extendedDiagnostics` is enabled. Config-read
+timing requires the flag on the command line, before the config is read. The report-only flow-memo, lazy-list,
+filesystem-call and reclaimed-page counters have been removed; their old statistics switches no longer report
+those counts.
+
 ## The flow memo and its shadow mode
 
 Control flow analysis keeps the result of a sub-walk (the type at a flow node for one reference) across walks
@@ -287,10 +286,6 @@ output. Environment switches, read once per process:
   panics with the reference, the flow node, and where the stored answer came from. Output equals `TSRS_FLOW_MEMO=0`.
   Run it over the suite (`TSRS_FLOW_MEMO=shadow tsrs-test run --suite all --baselines types,symbols --panic-summary`)
   and the corpora after any change to the checker that could affect what a flow walk reads.
-- `TSRS_FLOW_MEMO_STATS=1` with `--extendedDiagnostics`: one line per checker on stderr: walks, consults, answers
-  found / blocked (by an active loop analysis, the instantiation counters, another `flowTypeCache`, transient
-  `sharedFlows` values) / used, height misses (answers not used near the depth limit), stores, frames not stored and
-  why, walks redone after the depth limit (`aborts`), shadow checks.
 - `TSRS_FLOW_MEMO_BITS=<8..24>`: log2 of the table's slots (default 12, 32 bytes each).
 
 testdata/flow-memo holds the hazard cases (each with tsgo's output); `cargo test -p tsrs_cli --test flow_memo` runs
@@ -358,13 +353,13 @@ only its own declarations; on vscode 2,289 of the 2,337 leaves are predicted (99
 are parsed into the thread arenas as before. The text, the `SourceFile` and the diagnostics are kept, so the report is
 the same. It is off with declaration emit (`declaration`, `composite`), `--explainFiles`, `--incremental`, `--build`,
 `--checkerAssignment go`, in the language server, the API and the test harnesses, under the debug modes that walk
-files or checker tables after the check (`TSRS_FILE_TIMES`, `TSRS_ASSIGNMENT_STATS`, the work and heap censuses),
+files or checker tables after the check (`TSRS_FILE_TIMES` and the work census),
 and in builds without compressed pointers (`plain-ptrs`, non-unix): there a freed region's memory stays mapped and the heap its values owned is reused, so a stale read would see a live object, and nothing would be
 saved. Asking a program for one freed leaf's diagnostics after the pass panics (the tree is gone); the CLI never does.
 
 | variable | values | effect |
 | --- | --- | --- |
-| `TSRS_FREE_LEAVES` | a comma list of: unset (free with at most 16 checkers), `1` (free at any count), `0`, `keep`, `stats`, `all` | `0`: no file regions (the layout before). `keep` (any count): file regions and the leaf marks, nothing freed (what the regions alone cost). `all` (any count): every TypeScript root file gets a region, not only the predicted ones (frees every leaf, but moves every tree out of the huge-page thread arenas: +6-9% wall time on vscode at 32 checkers on Linux against +2.5-5% predicted). `stats`: one line on stderr: the leaves freed and the ones the prediction missed (with their share of the leaves' nodes), the bytes their regions used, all file regions' bytes, the pages given back and in how many system calls, and the arena address space the run used. Example: `TSRS_FREE_LEAVES=all,stats` |
+| `TSRS_FREE_LEAVES` | a comma list of: unset (free with at most 16 checkers), `1` (free at any count), `0`, `keep`, `stats`, `all` | `0`: no file regions (the layout before). `keep` (any count): file regions and the leaf marks, nothing freed (what the regions alone cost). `all` (any count): every TypeScript root file gets a region, not only the predicted ones (frees every leaf, but moves every tree out of the huge-page thread arenas: +6-9% wall time on vscode at 32 checkers on Linux against +2.5-5% predicted). `stats`: one line on stderr: the leaves freed and the ones the prediction missed (with their share of the leaves' nodes), the bytes their regions used, all file regions' bytes, and the arena address space the run used. Example: `TSRS_FREE_LEAVES=all,stats` |
 
 After a change that reads a file after the check pass (a new report, a new whole-program loop in the checker, such as
 `getAlternativeContainingModules`'s), run a corpus with `TSRS_ARENA_POISON=1`: a freed region is then filled with
@@ -387,7 +382,7 @@ API and the test harnesses, and under `TSRS_CHECK_SHARED=1`.
 
 | variable | values | effect |
 | --- | --- | --- |
-| `TSRS_LAZY_DTS` | unset (on when it applies), `0`/`off`, `stats`, `force` (`tsrs-test` only) | `stats`: one line on stderr: lists made lazy, deferred by the binder, never reached by it, parsed again (and how many while their file was bound). `force` in `tsrs-test`: every declaration file's lists are lazy, checked files included, so the checker and the `.types` / `.symbols` walks force them all: the result trees must equal a run without it (`TSRS_LAZY_DTS_STATS_FILE=<file>` collects the workers' counts) |
+| `TSRS_LAZY_DTS` | unset (on when it applies), `0`/`off`, `force` (`tsrs-test` only) | `force` in `tsrs-test`: every declaration file's lists are lazy, checked files included, so the checker and the `.types` / `.symbols` walks force them all: the result trees must equal a run without it |
 
 After a change to what the binder does for members of interfaces, classes or type literals, or to what a member list
 can contain, run the suite with `TSRS_LAZY_DTS=force` (also with `TS_TEST_PROGRAM_SINGLE_THREADED=false`) and a corpus
@@ -423,8 +418,7 @@ against tsgo-ref's output.
 ## Data races: ThreadSanitizer (`tools/ci/tsan.sh`)
 
 `P<T>` is `Send`/`Sync` by decree (`tsrs_core::ptr`): nothing in the type system stops two threads from writing the same
-arena value. The `thread-sanitizer` job, now disabled in `.github/workflows/ci.yml.bak`, builds tsrs with
-ThreadSanitizer and runs `tools/ci/tsan.sh`, which fails on
+arena value. Build tsrs with ThreadSanitizer and run `tools/ci/tsan.sh`, which fails on
 any report: type checks at 2 and 8 checkers, emit, `-b` on a generated graph of 12 projects, `--watch` and `-b --watch`
 with edits, and a language-server session. To run it locally (about 2 minutes on an M3 Max after a 2.5-minute build):
 

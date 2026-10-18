@@ -14,8 +14,6 @@ workspace = true
 site-counts = []
 # TSRS_WORK_CENSUS: attribute checker work to source patterns (workcensus.rs, docs/DEBUGGING.md).
 work-census = []
-# Instrumentation only (tsrs_compiler checkerpool_stats.rs): records every type/symbol the checker creates.
-assignment-stats = []
 
 [dependencies]
 tsrs_core.workspace = true
@@ -34,3 +32,6 @@ rustc-hash.workspace = true
 hashbrown.workspace = true
 bitflags.workspace = true
 xxhash-rust = { version = "0.8", features = ["xxh3", "const_xxh3"] }
+
+[lib]
+doctest = false

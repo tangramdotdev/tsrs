@@ -5,11 +5,13 @@ ts-ref
 __pycache__/
 npm/dist/
 bench/.work/
+bench/results/
 *.pyc
 .env
 .env.*
 .npmrc
 node_modules/
+.void/
 npm/tsrs/dist/
 npm/tsrs/tsconfig.tsbuildinfo
 npm/tsrs-wasm/tsrs.wasm

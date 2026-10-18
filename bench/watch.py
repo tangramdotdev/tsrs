@@ -165,11 +165,9 @@ def main() -> None:
     ap.add_argument("--work-dir", type=Path, default=run.BENCH / ".work")
     ap.add_argument("--tsrs", type=Path, default=run.REPO / "target" / "release" / "tsrs")
     ap.add_argument("--tsrs-build", choices=sorted(run.TSRS_BUILDS), default="release")
-    ap.add_argument("--tsgo", type=Path, help="native tsgo binary (default: install the npm release bench/projects.json "
-                                              "names, the `next` nightly)")
-    ap.add_argument("--tsgo-version", default=os.environ.get(run.TSGO_VERSION_ENV) or None,
-                    help=f"measure this exact npm version instead of resolving bench/projects.json's tag (default: "
-                         f"${run.TSGO_VERSION_ENV})")
+    ap.add_argument("--tsgo", type=Path, help="native tsgo binary (default: install typescript@<version> from npm)")
+    ap.add_argument("--tsgo-version", help="measure this npm version of typescript instead of bench/projects.json's "
+                                           "pinned nightly")
     ap.add_argument("--project", default=PROJECT, choices=sorted(LEAF))
     ap.add_argument("--reps", type=int, default=3, help="watch sessions of tsrs")
     ap.add_argument("--tsgo-reps", type=int, help="watch sessions of tsgo (default: --reps)")
@@ -186,8 +184,9 @@ def main() -> None:
     run.setup_project(cfg, p, work)
     cwd, proj = run.project_path(cfg, p, work)
     leaf = cwd / LEAF[args.project]
-    tsgo_cfg = run.tsgo_binary_info(args.tsgo) if args.tsgo else run.resolve_tsgo(cfg["tsgo"], args.tsgo_version)
-    tsgo = (args.tsgo or run.ensure_tsgo(tsgo_cfg, work)).resolve()
+    tsgo_pkg = run.tsgo_package(cfg, args.tsgo_version)
+    tsgo = (args.tsgo or run.ensure_tsgo(tsgo_pkg, work)).resolve()
+    tsgo_cfg = run.tsgo_binary_info(tsgo) if args.tsgo else run.tsgo_provenance(tsgo_pkg)
     run.log(f"tsgo: {run.tsgo_text(tsgo_cfg)}")
     tsrs = args.tsrs.resolve()
     tsgo_reps = args.tsgo_reps if args.tsgo_reps is not None else args.reps

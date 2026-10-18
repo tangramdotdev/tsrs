@@ -3,7 +3,7 @@
 # it must match the npm version npm/build.mjs derives from Cargo.toml. The conformance and fourslash gates run here on the BOLT-optimized
 # GNU binaries (.github/scripts/bolt.sh). The macOS binary gets only the smoke tests below; nothing runs the suites
 # on macOS (.github/workflows/ci.yml, Linux only, gates the source). The broader WebAssembly differential gate
-# (tools/wasm/gate.sh) is preserved in the disabled ci.yml.bak.
+# (tools/wasm/gate.sh) remains available locally.
 #
 # Setup before the first release:
 #   - npm trusted publishers for `tsrs`, `@tsrs/wasm` and every platform package: GitHub Actions,
@@ -99,7 +99,7 @@ jobs:
           fi
 
   # Release binaries are PGO builds with the `release` profile (fat LTO, one codegen unit; Cargo.toml): an instrumented
-  # ThinLTO build of tsrs + tsrs-test + tsrs-fourslash, the training workload (.github/scripts/pgo-train.sh: the conformance and fourslash suites
+  # ThinLTO build of tsrs + tsrs-test + fourslash_server, the training workload (.github/scripts/pgo-train.sh: the conformance and Go fourslash suites
   # and two open-source bench projects), then the final build with the merged profile. Numbers: notes/perf-pgo.md.
   # On Linux the final build is then optimized with BOLT (.github/scripts/bolt.sh; notes/perf-build-level.md), and
   # the conformance and fourslash gates run on BOLT-optimized binaries before the binary is staged.
@@ -110,6 +110,9 @@ jobs:
     env:
       # TypeScript's version in the binary (Cargo.toml [workspace.metadata.typescript] nightly).
       TSRS_TS_VERSION: ${{ needs.version.outputs.ts_nightly }}
+      TSRS_CARGO_FEATURES: tsrs_cli/noembed
+      # PGO requires matching profile settings. BOLT needs symbols until its final strip.
+      CARGO_PROFILE_RELEASE_STRIP: ${{ contains(matrix.target, 'linux') && 'none' || 'symbols' }}
     runs-on: ${{ matrix.os }}
     continue-on-error: ${{ matrix.experimental }}
     timeout-minutes: 90
@@ -126,16 +129,23 @@ jobs:
           # - { target: x86_64-pc-windows-msvc, os: windows-latest, experimental: true, run: true }
     steps:
       - uses: taiki-e/checkout-action@7d1e50e93dc4fb3bba58f85018fadf77898aee8b # v1.4.2
-      # The conformance suite (part of the training workload) reads its tests from ts-ref/tsc/testdata.
-      - name: Check out TypeScript testdata
+      # Training needs conformance fixtures and the Go fourslash source at the pinned commit.
+      - name: Check out TypeScript source and testdata
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: microsoft/TypeScript
           ref: ${{ needs.version.outputs.ts_commit }}
           path: ts-ref
           fetch-depth: 1
-          sparse-checkout: tsc/testdata
+          sparse-checkout: tsc
           persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: ts-ref/tsc/go.mod
+          cache: false
+      - uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
+        with:
+          python-version: '3.15'
       # The bench projects of the training workload install with their pinned package managers via pnpm (bench/run.py --setup-only).
       # No .npmrc: the default registry-url writes one with `_authToken=${NODE_AUTH_TOKEN}`, and yarn 1 (webpack's
       # install in the PGO training run) refuses to run while that variable is unset. Only `publish` needs the registry.
@@ -158,12 +168,13 @@ jobs:
           RUSTFLAGS: -Cprofile-generate=${{ runner.temp }}/pgo/raw -Clto=thin
           CFLAGS: ${{ runner.os == 'macOS' && '-fno-profile-generate' || '' }}
           CARGO_TARGET_DIR: ${{ runner.temp }}/pgo/target
-          # The same as the final build's: profile settings are part of every symbol name, and the profile only
-          # applies to functions whose names match (notes/perf-pgo.md, 2026-10-09).
-          CARGO_PROFILE_RELEASE_STRIP: ${{ runner.os == 'Linux' && 'none' || 'symbols' }}
-        run: cargo build --release --locked -p tsrs_cli -p tsrs_testrunner -p tsrs_fourslash --target ${{ matrix.target }}
+        # tsrs-test embeds libraries, Go supplies the task server's VFS, and the CLI uses disk libraries.
+        # Build together so their compiler symbols match for PGO.
+        run: cargo build --release --locked -p tsrs_cli -p tsrs_testrunner -p tsrs_fourslash_server --bins --features "$TSRS_CARGO_FEATURES" --target ${{ matrix.target }}
       - name: Training run
         shell: bash
+        env:
+          TSRS_LIB_PATH: ${{ github.workspace }}/crates/tsrs_vfs/libs
         run: .github/scripts/pgo-train.sh "$RUNNER_TEMP/pgo/target/${{ matrix.target }}/release" "$RUNNER_TEMP/pgo/raw" "$RUNNER_TEMP/pgo/bench"
       - name: Merge profiles
         id: profile
@@ -184,13 +195,10 @@ jobs:
         env:
           RUSTFLAGS: -Cprofile-use=${{ steps.profile.outputs.path }}${{ runner.os == 'Linux' && ' -Clink-arg=-Wl,--emit-relocs' || '' }}
           CFLAGS: ${{ runner.os == 'macOS' && '-fno-profile-use' || '' }}
-          # BOLT needs the Linux binaries' symbols; bolt.sh strips the optimized tsrs after its correctness gates.
-          # The instrumented build sets the same value.
-          CARGO_PROFILE_RELEASE_STRIP: ${{ runner.os == 'Linux' && 'none' || 'symbols' }}
         run: |
-          pkgs=(-p tsrs_cli)
-          [ "$RUNNER_OS" = Linux ] && pkgs+=(-p tsrs_testrunner -p tsrs_fourslash)
-          cargo build --release --locked "${pkgs[@]}" --target ${{ matrix.target }}
+          targets=(-p tsrs_cli)
+          [ "$RUNNER_OS" = Linux ] && targets+=(-p tsrs_testrunner -p tsrs_fourslash_server --bins)
+          cargo build --release --locked "${targets[@]}" --features "$TSRS_CARGO_FEATURES" --target ${{ matrix.target }}
       # BOLT from the LLVM release that matches rustc's LLVM. The tarball's tools need glibc 2.34 (22.04 has 2.35).
       - name: Install BOLT
         if: runner.os == 'Linux'
@@ -207,9 +215,13 @@ jobs:
       - name: BOLT and gates on the BOLT-optimized binaries
         if: runner.os == 'Linux'
         shell: bash
+        env:
+          TSRS_LIB_PATH: ${{ github.workspace }}/crates/tsrs_vfs/libs
         run: .github/scripts/bolt.sh "target/${{ matrix.target }}/release" "$RUNNER_TEMP/bolt" "$RUNNER_TEMP/pgo/bench"
       - name: Stage binary
         shell: bash
+        env:
+          TSRS_LIB_PATH: ${{ github.workspace }}/crates/tsrs_vfs/libs
         run: |
           exe=tsrs; [ "${{ matrix.target }}" = x86_64-pc-windows-msvc ] && exe=tsrs.exe
           mkdir -p "out/${{ matrix.target }}"
@@ -225,7 +237,7 @@ jobs:
         shell: bash
         run: |
           node npm/build.mjs --artifacts out --pack
-          node npm/sdk/smoke-consumer.mjs
+          node npm/sdk/smoke-consumer.mjs --noembed
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: bin-${{ matrix.target }}
@@ -242,7 +254,7 @@ jobs:
       - uses: oxc-project/setup-rust@3d6fb132fbe7cdcb66bf8ec193911c2945369d12 # v1.0.17
         with:
           restore-cache: false
-      - run: cargo check --workspace --locked
+      - run: cargo check --locked
 
   # Musl uses static dist builds without PGO/BOLT.
   build-musl:
@@ -251,6 +263,7 @@ jobs:
     env:
       # TypeScript's version in the binary (Cargo.toml [workspace.metadata.typescript] nightly).
       TSRS_TS_VERSION: ${{ needs.version.outputs.ts_nightly }}
+      TSRS_CARGO_FEATURES: tsrs_cli/noembed
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -267,9 +280,11 @@ jobs:
         with:
           version: 0.13.0
       - name: Build and stage musl binary
+        env:
+          TSRS_LIB_PATH: ${{ github.workspace }}/crates/tsrs_vfs/libs
         run: |
           rustup target add ${{ matrix.target }}
-          cargo zigbuild --release --locked -p tsrs_cli --target ${{ matrix.target }}
+          cargo zigbuild --release --locked -p tsrs_cli --features "$TSRS_CARGO_FEATURES" --target ${{ matrix.target }}
           mkdir -p "out/${{ matrix.target }}"
           cp "target/${{ matrix.target }}/release/tsrs" "out/${{ matrix.target }}/tsrs"
           "out/${{ matrix.target }}/tsrs" --version | tee version.txt
@@ -422,3 +437,10 @@ jobs:
         run: >-
           gh release create "v$VERSION" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA"
           --title "TSRS $VERSION" --notes-file "docs/releases/$VERSION.md" --prerelease=false --latest
+
+  playground:
+    needs: github-release
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/void-deploy.yml
