@@ -14,21 +14,29 @@ import publish
 import run
 
 
+FIXTURE = Path(__file__).parent / 'fixtures/reporting-64-vcpu.json'
+
+
+def resized(historical):
+    """The 64-vCPU fixture as a 16-vCPU result, which the chart draws (its `checkers16` mode)."""
+    result = copy.deepcopy(historical)
+    result['modes'] = ['checkers16' if mode == 'checkers64' else mode for mode in result['modes']]
+    result['mode_reps']['checkers16'] = result['mode_reps'].pop('checkers64')
+    for project in result['projects'].values():
+        project['checkers16'] = project.pop('checkers64')
+        for mode in ('wide', 'checkers16'):
+            machine = project[mode]['machine']
+            machine.update(cpus=16, memory_gb=63, label='Depot CI 16 vCPU')
+    return result
+
+
 class ReportingTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.historical = json.loads((Path(__file__).parent / 'fixtures/reporting-64-vcpu.json').read_text())
+        cls.historical = json.loads(FIXTURE.read_text())
 
     def resized(self):
-        result = copy.deepcopy(self.historical)
-        result['modes'] = ['checkers16' if mode == 'checkers64' else mode for mode in result['modes']]
-        result['mode_reps']['checkers16'] = result['mode_reps'].pop('checkers64')
-        for project in result['projects'].values():
-            project['checkers16'] = project.pop('checkers64')
-            for mode in ('wide', 'checkers16'):
-                machine = project[mode]['machine']
-                machine.update(cpus=16, memory_gb=63, label='Depot CI 16 vCPU')
-        return result
+        return resized(self.historical)
 
     def test_legacy_table_update_preserves_published_chart(self):
         contents = ('# Project\n\n![Benchmark](bench/large-projects.svg)\n',
@@ -320,41 +328,92 @@ class TsgoNightlyTests(unittest.TestCase):
     PINNED = {'package': 'typescript', 'version': '7.1.0-dev.20261016.1'}
     COMMIT = 'abcbb2e69d2a86d9ffee66582a0dd0339b674733'
     PUBLISHED = '2026-10-16T08:21:23.515Z'
+    RECORDED = dict(PINNED, commit=COMMIT, published=PUBLISHED)
 
-    def view(self, version):
-        meta = {'gitHead': self.COMMIT, 'time': {version: self.PUBLISHED, 'modified': '2026-10-18T00:00:00.000Z'}}
-        return subprocess.CompletedProcess([], 0, stdout=json.dumps(meta))
+    def view(self, stdout):
+        return subprocess.CompletedProcess([], 0, stdout=stdout if isinstance(stdout, str) else json.dumps(stdout))
+
+    def manifest(self, version='7.1.0-dev.20261016.1'):
+        return {'name': 'typescript', 'version': version, 'gitHead': self.COMMIT,
+                'time': {version: self.PUBLISHED, 'modified': '2026-10-18T00:00:00.000Z'}}
 
     def test_the_pinned_nightly_records_its_commit_and_publish_time(self):
-        with patch.object(run.subprocess, 'run', return_value=self.view(self.PINNED['version'])) as view:
+        with patch.object(run.subprocess, 'run', return_value=self.view(self.manifest())) as view:
             info = run.tsgo_provenance(run.tsgo_package({'tsgo': self.PINNED}))
-        self.assertEqual(['npm', 'view', '--json', 'typescript@7.1.0-dev.20261016.1', 'gitHead', 'time'],
-                         view.call_args.args[0])
-        self.assertEqual(dict(self.PINNED, commit=self.COMMIT, published=self.PUBLISHED), info)
+        self.assertEqual(['npm', 'view', '--json', 'typescript@7.1.0-dev.20261016.1'], view.call_args.args[0])
+        self.assertEqual(self.RECORDED, info)
 
     def test_an_explicit_version_replaces_the_pinned_one(self):
         self.assertEqual({'package': 'typescript', 'version': '7.1.0-dev.20261015.1'},
                          run.tsgo_package({'tsgo': self.PINNED}, '7.1.0-dev.20261015.1'))
         self.assertEqual(self.PINNED, run.tsgo_package({'tsgo': self.PINNED}))
 
-    def test_a_registry_failure_does_not_stop_the_run(self):
-        error = subprocess.CalledProcessError(1, ['npm'])
-        with patch.object(run.subprocess, 'run', side_effect=error):
-            self.assertEqual(dict(self.PINNED, commit=None, published=None), run.tsgo_provenance(self.PINNED))
+    def test_tsgo_version_must_be_exact_and_not_with_a_binary(self):
+        ap = run.argparse.ArgumentParser()
+        for version in ('7.1.0-dev.20261016.1', '7.0.2', None):
+            run.check_tsgo_args(ap, run.argparse.Namespace(tsgo_version=version, tsgo=None))
+        for version, binary in (('next', None), ('7', None), ('>=7.0.0', None), ('7.0.2', Path('tsc'))):
+            with self.subTest(version=version, binary=binary), patch('sys.stderr'), self.assertRaises(SystemExit):
+                run.check_tsgo_args(ap, run.argparse.Namespace(tsgo_version=version, tsgo=binary))
+
+    def test_unusable_registry_answers_record_no_provenance(self):
+        missing = dict(self.PINNED, commit=None, published=None)
+        answers = {'failure': subprocess.CalledProcessError(1, ['npm']),
+                   'timeout': subprocess.TimeoutExpired(['npm'], 60),
+                   'no npm': FileNotFoundError('npm'),
+                   'not JSON': self.view('npm warn something\n'),
+                   'a list': self.view([self.manifest()]),
+                   'a bare value': self.view(self.COMMIT),
+                   'another version': self.view(self.manifest('7.1.0-dev.20261017.1'))}
+        for name, answer in answers.items():
+            with self.subTest(name), patch('sys.stderr'):
+                effect = {'side_effect': answer} if isinstance(answer, BaseException) else {'return_value': answer}
+                with patch.object(run.subprocess, 'run', **effect):
+                    self.assertEqual(missing, run.tsgo_provenance(self.PINNED))
+        no_time = {k: v for k, v in self.manifest().items() if k != 'time'}
+        with patch.object(run.subprocess, 'run', return_value=self.view(no_time)):
+            self.assertEqual(dict(self.RECORDED, published=None), run.tsgo_provenance(self.PINNED))
 
     def test_reports_name_the_nightly_and_its_commit(self):
-        historical = json.loads((Path(__file__).parent / 'fixtures/reporting-64-vcpu.json').read_text())
+        historical = json.loads(FIXTURE.read_text())
         version = historical['tsgo']['version']
         self.assertIn(f'- **tsgo**: npm `typescript@{version}`, the official Go compiler', run.markdown(historical))
-        result = dict(historical, tsgo=dict(self.PINNED, commit=self.COMMIT, published=self.PUBLISHED, binary='~/tsc'))
+        result = dict(historical, tsgo=dict(self.RECORDED, binary='~/tsc'))
         report = run.markdown(result)
         self.assertIn('## Benchmark: tsrs vs tsgo 7.1.0-dev.20261016.1', report)
         self.assertIn('- **tsgo**: npm `typescript@7.1.0-dev.20261016.1` (published 2026-10-16, from '
                       'microsoft/TypeScript `abcbb2e6`), the official Go compiler', report)
-        sixteen = ReportingTests()
-        sixteen.historical = result
         self.assertIn('tsgo: npm typescript@7.1.0-dev.20261016.1 (published 2026-10-16, from microsoft/TypeScript '
-                      'abcbb2e6)', chart.svg(sixteen.resized()))
+                      'abcbb2e6)', chart.svg(resized(result)))
+        local = dict(historical, tsgo={'package': None, 'version': '7.1.0-dev', 'commit': None, 'published': None})
+        self.assertIn('- **tsgo**: a local build (`--version`: 7.1.0-dev), the official Go compiler',
+                      run.markdown(local))
+
+    def merge(self, *tsgos):
+        historical = json.loads(FIXTURE.read_text())
+        with tempfile.TemporaryDirectory() as directory:
+            paths = []
+            # One partial per mode of the fixture's one project, as parallel jobs would write them.
+            modes = historical['modes']
+            for i, tsgo in enumerate(tsgos):
+                share = modes[i::len(tsgos)]
+                projects = {name: {k: v for k, v in pr.items() if k not in modes or k in share}
+                            for name, pr in historical['projects'].items()}
+                part = dict(historical, tsgo=tsgo, modes=share, projects=projects, raw=[])
+                paths.append(Path(directory) / f'{i}.json')
+                paths[-1].write_text(json.dumps(part))
+            with patch('sys.stderr'):
+                return run.merge_results({'projects': [{'name': n} for n in historical['projects']]}, paths)['tsgo']
+
+    def test_merge_keeps_the_provenance_any_partial_found(self):
+        missing = dict(self.PINNED, commit=None, published=None)
+        self.assertEqual(self.RECORDED, self.merge(missing, self.RECORDED))
+        self.assertEqual(missing, self.merge(missing, missing))
+        self.assertEqual({'version': '7.0.2'}, self.merge({'version': '7.0.2'}, {'version': '7.0.2'}))
+        local = dict(missing, package=None)
+        for other in (dict(self.RECORDED, commit='0' * 40), local, dict(self.RECORDED, version='7.1.0-dev.20261017.1')):
+            with self.subTest(other=other), self.assertRaises(SystemExit), patch('sys.stderr'):
+                self.merge(self.RECORDED, other)
 
 
 if __name__ == '__main__':

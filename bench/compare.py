@@ -225,6 +225,7 @@ def main() -> None:
     work = args.work_dir.resolve()
     exes: dict[str, Path] = {}
     versions: dict[str, str] = {}
+    rb.check_tsgo_args(ap, args)
     tsgo_pkg = rb.tsgo_package(cfg, args.tsgo_version)
     tsgo_info = rb.tsgo_provenance(tsgo_pkg) if "tsgo" in compilers else None
     for c in compilers:

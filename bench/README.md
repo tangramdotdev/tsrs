@@ -55,17 +55,21 @@ tsgo is a TypeScript nightly pinned to one exact version in `bench/projects.json
 changes `bench/projects.json`, which starts `update-benchmarks.yml`, so every published result is measured against
 one known nightly, and all the jobs of a run measure the same one.
 
-Every result records the nightly it measured, under `tsgo` in the JSON:
+Every `run.py` and `watch.py` result records the nightly it measured, under `tsgo` in the JSON (`compare.py` results
+have the same fields without `binary`):
 
 | field | example | from |
 | --- | --- | --- |
-| `version` | `7.1.0-dev.20261016.1` | the pin in `bench/projects.json`, or `--tsgo-version` |
-| `commit` | `abcbb2e69d2a86d9ffee66582a0dd0339b674733` | the package's `gitHead` on npm: the microsoft/TypeScript commit it was published from |
+| `package` | `typescript` | `bench/projects.json`; `null` for a `--tsgo` binary |
+| `version` | `7.1.0-dev.20261016.1` | the pin in `bench/projects.json`, `--tsgo-version`, or a `--tsgo` binary's `--version` |
+| `commit` | `abcbb2e69d2a86d9ffee66582a0dd0339b674733` | the package's `gitHead` on npm: the microsoft/TypeScript commit the nightly was built and published from |
 | `published` | `2026-10-16T08:21:23.515Z` | the npm publish time of that version |
 | `binary` | `.../typescript-linux-x64/lib/tsc` | the native compiler that ran |
 
-`commit` and `published` come from `npm view` when the run starts (`tsgo_provenance` in `run.py`); if the registry
-does not answer, the run goes on and records them as `null`. The reports name the nightly in the title and the tsgo
+`commit` and `published` come from `npm view --json typescript@<version>` when the run starts (`tsgo_provenance` in
+`run.py`); if the registry does not answer, the run goes on and records them as `null`, and `run.py --merge` takes
+them from any partial that has them. `gitHead` is the commit the nightly was built from, which can be a CI-only commit
+on top of a source commit: `reference`'s `gitHead` is `9adc871f`, whose parent `b85298b6` is the commit tsrs ports. The reports name the nightly in the title and the tsgo
 line, for example:
 
 > ## Benchmark: tsrs vs tsgo 7.1.0-dev.20261016.1
@@ -78,8 +82,9 @@ in their SVG description; the results pull request names the version. To find wh
 from, read the tsgo line of the report or `tsgo.version` / `tsgo.commit` in the result's JSON.
 
 To measure another version (to reproduce a result, or to compare two nightlies), pass `--tsgo-version <version>` to
-`run.py`, `watch.py` or `compare.py`. `--tsgo <binary>` measures a local build; the result then records only what its
-`--version` prints.
+`run.py`, `watch.py` or `compare.py`; it takes one exact version, not a range or a dist-tag. `--tsgo <binary>` measures
+a local build instead (not together with `--tsgo-version`); the result then records only what its `--version` prints,
+and the reports call it a local build.
 
 ```sh
 python3 bench/run.py --local --projects webpack --tsgo-version 7.1.0-dev.20261016.1
