@@ -166,8 +166,6 @@ def main() -> None:
     ap.add_argument("--tsrs", type=Path, default=run.REPO / "target" / "release" / "tsrs")
     ap.add_argument("--tsrs-build", choices=sorted(run.TSRS_BUILDS), default="release")
     ap.add_argument("--tsgo", type=Path, help="native tsgo binary (default: install typescript@<version> from npm)")
-    ap.add_argument("--tsgo-version", help="measure this npm version of typescript instead of bench/projects.json's "
-                                           "pinned nightly")
     ap.add_argument("--project", default=PROJECT, choices=sorted(LEAF))
     ap.add_argument("--reps", type=int, default=3, help="watch sessions of tsrs")
     ap.add_argument("--tsgo-reps", type=int, help="watch sessions of tsgo (default: --reps)")
@@ -177,7 +175,6 @@ def main() -> None:
     ap.add_argument("--rustc", help="`rustc -V` of the toolchain that built --tsrs (default: this machine's)")
     ap.add_argument("--out-dir", type=Path, default=run.BENCH / "results")
     args = ap.parse_args()
-    run.check_tsgo_args(ap, args)
 
     cfg = json.loads((run.BENCH / "projects.json").read_text())
     p = next(p for p in cfg["projects"] if p["name"] == args.project)
@@ -185,10 +182,7 @@ def main() -> None:
     run.setup_project(cfg, p, work)
     cwd, proj = run.project_path(cfg, p, work)
     leaf = cwd / LEAF[args.project]
-    tsgo_pkg = run.tsgo_package(cfg, args.tsgo_version)
-    tsgo = (args.tsgo or run.ensure_tsgo(tsgo_pkg, work)).resolve()
-    tsgo_cfg = run.tsgo_binary_info(tsgo) if args.tsgo else run.tsgo_provenance(tsgo_pkg)
-    run.log(f"tsgo: {run.tsgo_text(tsgo_cfg)}")
+    tsgo = (args.tsgo or run.ensure_tsgo(cfg["tsgo"], work)).resolve()
     tsrs = args.tsrs.resolve()
     tsgo_reps = args.tsgo_reps if args.tsgo_reps is not None else args.reps
     now = dt.datetime.now(dt.timezone.utc)
@@ -217,7 +211,7 @@ def main() -> None:
         "machine": run.machine_info(args.local, args.label),
         "tsrs": {"commit": commit, "dirty": dirty, "version": tsrs_version, "build": args.tsrs_build,
                  "rustc": args.rustc or run.rustc_version()},
-        "tsgo": {**tsgo_cfg, "binary": str(tsgo).replace(str(Path.home()), "~")},
+        "tsgo": {"version": cfg["tsgo"]["version"], "binary": str(tsgo).replace(str(Path.home()), "~")},
         "watch": {"project": args.project, "project_path": p["project"], "leaf": LEAF[args.project],
                   "reps": args.reps, "tsgo_reps": tsgo_reps, "edits": args.edits, "quiet_s": args.quiet,
                   "tsgo": summarize(sessions["tsgo"]), "tsrs": summarize(sessions["tsrs"]), "sessions": sessions},

@@ -55,40 +55,18 @@ tsgo is a TypeScript nightly pinned to one exact version in `bench/projects.json
 changes `bench/projects.json`, which starts `update-benchmarks.yml`, so every published result is measured against
 one known nightly, and all the jobs of a run measure the same one.
 
-Every `run.py` and `watch.py` result records the nightly it measured, under `tsgo` in the JSON (`compare.py` results
-have the same fields without `binary`):
+Every result records the nightly it measured: `tsgo.version` (and `tsgo.binary`, the native compiler that ran) in
+the JSON of `run.py` and `watch.py`, and `versions.tsgo` (its `--version` output) in `compare.py`'s. The reports name
+it in the title and the tsgo line, for example:
 
-| field | example | from |
-| --- | --- | --- |
-| `package` | `typescript` | `bench/projects.json`; `null` for a `--tsgo` binary |
-| `version` | `7.1.0-dev.20261016.1` | the pin in `bench/projects.json`, `--tsgo-version`, or a `--tsgo` binary's `--version` |
-| `commit` | `abcbb2e69d2a86d9ffee66582a0dd0339b674733` | the package's `gitHead` on npm: the microsoft/TypeScript commit the nightly was built and published from |
-| `published` | `2026-10-16T08:21:23.515Z` | the npm publish time of that version |
-| `binary` | `.../typescript-linux-x64/lib/tsc` | the native compiler that ran |
-
-`commit` and `published` come from `npm view --json typescript@<version>` when the run starts (`tsgo_provenance` in
-`run.py`); if the registry does not answer, the run goes on and records them as `null`, and `run.py --merge` takes
-them from any partial that has them. `gitHead` is the commit the nightly was built from, which can be a CI-only commit
-on top of a source commit: `reference`'s `gitHead` is `9adc871f`, whose parent `b85298b6` is the commit tsrs ports. The reports name the nightly in the title and the tsgo
-line, for example:
-
-> ## Benchmark: tsrs vs tsgo 7.1.0-dev.20261016.1
+> ## Benchmark: tsrs vs tsgo 7.1.0-dev.20261018.1
 >
-> - **tsgo**: npm `typescript@7.1.0-dev.20261016.1` (published 2026-10-16, from microsoft/TypeScript `abcbb2e6`), the
->   official Go compiler. tsrs ports commit `b85298b6`.
+> - **tsgo**: npm `typescript@7.1.0-dev.20261018.1`, the official Go compiler. tsrs ports commit `b85298b6`.
 
-`bench/RESULTS.md`, `bench/results/<date>-<commit>.md` and the `compare.py` report carry that line; the charts carry it
-in their SVG description; the results pull request names the version. To find which nightly a published number came
-from, read the tsgo line of the report or `tsgo.version` / `tsgo.commit` in the result's JSON.
-
-To measure another version (to reproduce a result, or to compare two nightlies), pass `--tsgo-version <version>` to
-`run.py`, `watch.py` or `compare.py`; it takes one exact version, not a range or a dist-tag. `--tsgo <binary>` measures
-a local build instead (not together with `--tsgo-version`); the result then records only what its `--version` prints,
-and the reports call it a local build.
-
-```sh
-python3 bench/run.py --local --projects webpack --tsgo-version 7.1.0-dev.20261016.1
-```
+`bench/RESULTS.md`, `bench/results/<date>-<commit>.md` and the chart SVG descriptions carry it, and the results pull
+request names it. The version's date is the nightly's build date; `npm view typescript@<version> gitHead` gives the
+microsoft/TypeScript commit it was built from. To measure another version locally, change the pin in
+`bench/projects.json`; `--tsgo <binary>` measures a local build.
 
 Local results are ignored by Git and go to `bench/results/<date>-<tsrs commit>[-local].{json,md}`; per-run compiler output to
 `<work-dir>/logs/<timestamp>/`. The first run clones and installs the projects into `<work-dir>/solutions`
@@ -543,7 +521,7 @@ with the `verify` label, run `8hc5870p99`): 8 min 42 s, of which cache restores 
 compare on one wide machine, the way Bun's `bun check` announcement measured them (vscode, Linux x64, 64 threads,
 mean of 20 runs). It runs four compilers on the same checkouts:
 
-- `tsgo`: the pinned nightly (as in `run.py`, "Which tsgo"; the report names its version, publish date and commit);
+- `tsgo`: the pinned nightly (as in `run.py`, "Which tsgo");
 - `tsgo-dev`: `typescript@7.1.0-dev.20260930.4` (`reference` in `projects.json`), built from the TypeScript commit
   tsrs ports, so it is both the like-for-like Go baseline and the error oracle;
 - `tsrs`: the binary given with `--tsrs`;

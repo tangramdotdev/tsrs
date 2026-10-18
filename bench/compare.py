@@ -146,8 +146,7 @@ def markdown(result: dict) -> str:
         f"compiler order rotates every rep), after one untimed warm-up per compiler and project. The timed runs pass "
         f"no `--extendedDiagnostics`; the warm-up does, for the file counts.",
         "",
-        "Compilers: " + "; ".join(f"{LABELS[c]} = `{v[c]}`" for c in result["compilers"]) + "."
-        + (f" tsgo: {rb.tsgo_text(result['tsgo'])}." if result.get("tsgo") else ""),
+        "Compilers: " + "; ".join(f"{LABELS[c]} = `{v[c]}`" for c in result["compilers"]) + ".",
         "",
         "Threads: `default` passes no flag (tsgo then uses 4 checker threads, tsrs every core up to 16, then half the cores, at most 32, bun "
         "one thread per core). N passes `--checkers N` to tsgo/tsrs (checker threads; parsing still uses every core) "
@@ -193,8 +192,6 @@ def main() -> None:
     ap.add_argument("--projects", default="vscode", help="comma-separated subset of bench/projects.json")
     ap.add_argument("--threads", default="default,4,8,16,all",
                     help="comma-separated: default, a number, or all (= os.cpu_count())")
-    ap.add_argument("--tsgo-version", help="measure this npm version of typescript as tsgo instead of "
-                                           "bench/projects.json's pinned nightly")
     ap.add_argument("--reps", type=int, default=20)
     ap.add_argument("--timeout", type=float, default=900)
     ap.add_argument("--work-dir", type=Path, default=rb.BENCH / ".work")
@@ -225,12 +222,9 @@ def main() -> None:
     work = args.work_dir.resolve()
     exes: dict[str, Path] = {}
     versions: dict[str, str] = {}
-    rb.check_tsgo_args(ap, args)
-    tsgo_pkg = rb.tsgo_package(cfg, args.tsgo_version)
-    tsgo_info = rb.tsgo_provenance(tsgo_pkg) if "tsgo" in compilers else None
     for c in compilers:
         if c == "tsgo":
-            exes[c] = rb.ensure_tsgo(tsgo_pkg, work).resolve()
+            exes[c] = rb.ensure_tsgo(cfg["tsgo"], work).resolve()
         elif c == "tsgo-dev":
             exes[c] = rb.ensure_tsgo(cfg["reference"], work).resolve()
         else:
@@ -246,7 +240,7 @@ def main() -> None:
     now = dt.datetime.now(dt.timezone.utc)
     machine = rb.machine_info(False, args.label)
     result: dict = {"date": now.strftime("%Y-%m-%d %H:%M UTC"), "machine": machine, "tsrs_commit": commit,
-                    "versions": versions, "tsgo": tsgo_info, "compilers": compilers, "threads": threads, "reps": args.reps,
+                    "versions": versions, "compilers": compilers, "threads": threads, "reps": args.reps,
                     "projects": {}, "raw": []}
     logs = work / "logs" / f"compare-{now.strftime('%Y%m%d-%H%M%S')}"
     t_start = time.perf_counter()
