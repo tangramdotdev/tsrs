@@ -2,9 +2,9 @@
 
 `bench/run.py` type-checks the projects the TypeScript team benchmarks the Go compiler on
 ([microsoft/typescript-benchmarking](https://github.com/microsoft/typescript-benchmarking), `cases/`) and eleven
-open-source applications and libraries (see "Application projects") with tsrs, with tsgo (a pinned TypeScript nightly;
-see "Which tsgo") and, where a Bun binary is given, with `bun check`, and reports wall time, peak memory and the error
-count of each.
+open-source applications and libraries (see "Application projects") with tsrs, with tsgo (the TypeScript nightly pinned
+in `bench/projects.json`, which Renovate bumps to npm's `next` tag) and, where a Bun binary is given, with `bun check`,
+and reports wall time, peak memory and the error count of each.
 Wall-time reports are published by [`.github/workflows/update-benchmarks.yml`](../.github/workflows/update-benchmarks.yml)
 on changes to the project list or workflow, and on manual dispatch. The local commands below remain available.
 The outdated `bench/results/` archive has been removed from the working tree; historical runs remain in
@@ -46,27 +46,6 @@ python3 bench/chart.py bench/results/<date>-<commit>.json --output /tmp/benchmar
 ```
 
 Publishing preserves a newer commit's tables and chart when an older backfill finishes later.
-
-## Which tsgo
-
-tsgo is a TypeScript nightly pinned to one exact version in `bench/projects.json` (`"tsgo": {"package": "typescript",
-"version": "7.1.0-dev.<date>.<n>"}`). Renovate keeps it on the newest nightly: a custom manager in
-`.github/renovate.json` follows npm's `next` dist-tag and opens a pull request that bumps the pin. Merging the bump
-changes `bench/projects.json`, which starts `update-benchmarks.yml`, so every published result is measured against
-one known nightly, and all the jobs of a run measure the same one.
-
-Every result records the nightly it measured: `tsgo.version` (and `tsgo.binary`, the native compiler that ran) in
-the JSON of `run.py` and `watch.py`, and `versions.tsgo` (its `--version` output) in `compare.py`'s. The reports name
-it in the title and the tsgo line, for example:
-
-> ## Benchmark: tsrs vs tsgo 7.1.0-dev.20261018.1
->
-> - **tsgo**: npm `typescript@7.1.0-dev.20261018.1`, the official Go compiler. tsrs ports commit `b85298b6`.
-
-`bench/RESULTS.md`, `bench/results/<date>-<commit>.md` and the chart SVG descriptions carry it, and the results pull
-request names it. The version's date is the nightly's build date; `npm view typescript@<version> gitHead` gives the
-microsoft/TypeScript commit it was built from. To measure another version locally, change the pin in
-`bench/projects.json`; `--tsgo <binary>` measures a local build.
 
 Local results are ignored by Git and go to `bench/results/<date>-<tsrs commit>[-local].{json,md}`; per-run compiler output to
 `<work-dir>/logs/<timestamp>/`. The first run clones and installs the projects into `<work-dir>/solutions`
@@ -181,7 +160,7 @@ tsrs's errors (the table's errors paragraph names such projects).
   `--noEmit` instead of the suite's `--outdir` keeps the measurement to type checking; `--pretty
   false` makes the error lines parseable.
 - tsgo: `pnpm add typescript@<version> @typescript/typescript-<os>-<arch>@<version>`, with `<version>` the pinned
-  nightly ("Which tsgo"). Its `bin/tsc` is a Node launcher (`lib/tsc.js` -> `getExePath.js`) that `execve`s the Go
+  nightly. Its `bin/tsc` is a Node launcher (`lib/tsc.js` -> `getExePath.js`) that `execve`s the Go
   binary `@typescript/typescript-<os>-<arch>/lib/tsc`; the harness runs that binary directly (checked to be a native
   executable printing `Version <version>`), so Node startup is not part of the measurement.
 - tsrs: by default the release build of the checked-out commit (`target/release/tsrs`). CI measures what the npm
@@ -218,7 +197,7 @@ tsrs's errors (the table's errors paragraph names such projects).
 
 ## Watch mode
 
-`bench/watch.py` measures `--watch` on vscode: tsrs against the pinned tsgo nightly ("Which tsgo"), both started as
+`bench/watch.py` measures `--watch` on vscode: tsrs against the pinned tsgo nightly, both started as
 `--watch -p src --noEmit --preserveWatchOutput --pretty false` with no thread flags. bun check has no watch mode (Bun
 1.4.4 canary: `bun check` has no `--watch` flag, and `bun --watch check` checks once and ignores later edits), so it has
 no column. Each session:
@@ -521,7 +500,7 @@ with the `verify` label, run `8hc5870p99`): 8 min 42 s, of which cache restores 
 compare on one wide machine, the way Bun's `bun check` announcement measured them (vscode, Linux x64, 64 threads,
 mean of 20 runs). It runs four compilers on the same checkouts:
 
-- `tsgo`: the pinned nightly (as in `run.py`, "Which tsgo");
+- `tsgo`: the pinned nightly (as in `run.py`);
 - `tsgo-dev`: `typescript@7.1.0-dev.20260930.4` (`reference` in `projects.json`), built from the TypeScript commit
   tsrs ports, so it is both the like-for-like Go baseline and the error oracle;
 - `tsrs`: the binary given with `--tsrs`;
