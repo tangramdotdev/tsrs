@@ -390,3 +390,190 @@ fn emit_of_a_synthesized_return_expression() {
         )]
     );
 }
+
+type AttributeResolutionCalls = Arc<Mutex<Vec<(String, Vec<(&'static str, &'static str)>)>>>;
+
+struct AttributeResolver {
+    resolver: tsrs_module::DefaultResolver,
+    calls: AttributeResolutionCalls,
+}
+
+impl tsrs_module::Resolver for AttributeResolver {
+    fn uses_import_attributes(&self) -> bool {
+        true
+    }
+
+    fn resolve_module_name_literal(
+        &self,
+        module_specifier: P<tsrs_ast::Node>,
+        containing_source_file: P<tsrs_ast::SourceFile>,
+        containing_file: &str,
+        mode: tsrs_core::ResolutionMode,
+        redirect: Option<&dyn tsrs_module::ResolvedProjectReference>,
+    ) -> Result<(P<tsrs_module::ResolvedModule>, Vec<tsrs_module::DiagAndArgs>), String> {
+        assert_eq!(containing_source_file.file_name(), containing_file);
+        let attributes = tsrs_module::module_resolution_attributes(module_specifier);
+        let name = attributes
+            .iter()
+            .find(|(name, _)| *name == "kind")
+            .map_or("plain", |(_, value)| *value);
+        let result = self.resolver.resolve_module_name(
+            &format!("./{name}.js"),
+            containing_file,
+            mode,
+            redirect,
+        );
+        self.calls.lock().unwrap().push((containing_file.to_string(), attributes));
+        result
+    }
+
+    fn resolve_module_name(
+        &self,
+        name: &str,
+        containing_file: &str,
+        mode: tsrs_core::ResolutionMode,
+        redirect: Option<&dyn tsrs_module::ResolvedProjectReference>,
+    ) -> Result<(P<tsrs_module::ResolvedModule>, Vec<tsrs_module::DiagAndArgs>), String> {
+        self.resolver.resolve_module_name(name, containing_file, mode, redirect)
+    }
+
+    fn resolve_module_name_from_directory(
+        &self,
+        name: &str,
+        containing_directory: &str,
+        mode: tsrs_core::ResolutionMode,
+    ) -> Result<(P<tsrs_module::ResolvedModule>, Vec<tsrs_module::DiagAndArgs>), String> {
+        self.resolver.resolve_module_name_from_directory(name, containing_directory, mode)
+    }
+
+    fn resolve_type_reference_directive(
+        &self,
+        name: &str,
+        containing_file: &str,
+        mode: tsrs_core::ResolutionMode,
+        redirect: Option<&dyn tsrs_module::ResolvedProjectReference>,
+    ) -> (P<tsrs_module::ResolvedTypeReferenceDirective>, Vec<tsrs_module::DiagAndArgs>) {
+        self.resolver.resolve_type_reference_directive(name, containing_file, mode, redirect)
+    }
+
+    fn get_resolution_data(&self) -> P<tsrs_module::ResolutionData> {
+        self.resolver.get_resolution_data()
+    }
+}
+
+#[test]
+fn native_import_attributes_resolution_and_updates() {
+    let index = r#"
+import { value as number } from "dep" with { kind: "number" };
+import { value as string } from "dep" with { kind: "string" };
+export { value } from "dep" with { kind: "number" };
+const dynamic = import("dep", { with: { kind: "string" } });
+type Value = import("dep", { with: { kind: "number" } }).Value;
+import { value as plain } from "dep";
+import { value as empty } from "dep" with {};
+const validNumber: number = number;
+const validString: string = string;
+const wrong: string = number;
+"#;
+    let files = [
+        (
+            "/src/tsconfig.json",
+            r#"{"compilerOptions":{"noLib":true,"module":"esnext","moduleResolution":"bundler","types":[]},"files":["index.ts"]}"#,
+        ),
+        ("/src/index.ts", index),
+        ("/src/number.ts", "export const value = 1; export type Value = number;"),
+        ("/src/string.ts", "export const value = 'string'; export type Value = string;"),
+        ("/src/plain.ts", "export const value = true;"),
+    ];
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let calls_clone = Arc::clone(&calls);
+    let factory: crate::CreateModuleResolver = Arc::new(move |options| {
+        Box::new(AttributeResolver {
+            resolver: tsrs_module::new_resolver(options),
+            calls: Arc::clone(&calls_clone),
+        })
+    });
+    let mut options = ProgramOptions::new(config_for(&files), host_for(&files));
+    options.create_module_resolver = Some(Arc::clone(&factory));
+    let program = new_program(options);
+    let file = program.get_source_file("/src/index.ts").unwrap();
+    assert_eq!(file.imports().len(), 7);
+    assert_eq!(calls.lock().unwrap().len(), 7);
+    for &literal in file.imports() {
+        let attributes = tsrs_module::module_resolution_attributes(literal);
+        let expected =
+            format!("/src/{}.ts", attributes.first().map_or("plain", |(_, value)| *value));
+        assert_eq!(
+            program
+                .get_resolved_module_from_module_specifier(file, literal)
+                .unwrap()
+                .resolved_file_name,
+            expected
+        );
+    }
+    assert!(
+        file.imports()
+            .iter()
+            .any(|&literal| tsrs_module::module_resolution_attributes_key(file, literal).is_none())
+    );
+    assert!(
+        file.imports().iter().any(|&literal| tsrs_module::module_resolution_attributes_key(
+            file, literal
+        )
+        .is_some()
+            && tsrs_module::module_resolution_attributes(literal).is_empty())
+    );
+    let diagnostics = program.get_semantic_diagnostics(&Context::default(), Some(file));
+    let assignments: Vec<_> =
+        diagnostics.iter().filter(|diagnostic| diagnostic.code() == 2322).collect();
+    assert_eq!(assignments.len(), 1, "{diagnostics:?}");
+    assert!(file.text()[assignments[0].pos().unwrap() as usize..].starts_with("wrong"));
+
+    // Reuse a program after an edit that leaves import attributes unchanged.
+    let edited = format!("\n{index}");
+    let edited_files = [files[0], ("/src/index.ts", edited.as_str()), files[2], files[3], files[4]];
+    let (reused, changed, did_reuse) = program.reuse_program(
+        &Path::from("/src/index.ts"),
+        host_for(&edited_files),
+        None,
+        Some(Arc::clone(&factory)),
+    );
+    assert!(did_reuse);
+    let reused = reused.unwrap();
+    let changed = changed.unwrap();
+    for &literal in changed.imports() {
+        assert!(
+            reused
+                .get_resolved_module_from_module_specifier(changed, literal)
+                .unwrap()
+                .is_resolved()
+        );
+    }
+    assert_eq!(calls.lock().unwrap().len(), 7);
+
+    // Rebuild resolution after an attribute-only edit to an existing specifier.
+    let edited = index.replacen("kind: \"number\"", "kind: \"string\"", 1);
+    let edited_files = [files[0], ("/src/index.ts", edited.as_str()), files[2], files[3], files[4]];
+    let (rebuilt, changed, did_reuse) = program.update_program(
+        &Path::from("/src/index.ts"),
+        host_for(&edited_files),
+        None,
+        Some(factory),
+    );
+    assert!(!did_reuse);
+    let changed = changed.unwrap();
+    assert_eq!(
+        rebuilt
+            .get_resolved_module_from_module_specifier(changed, changed.imports()[0])
+            .unwrap()
+            .resolved_file_name,
+        "/src/string.ts"
+    );
+    assert_eq!(
+        program
+            .get_resolved_module_from_module_specifier(file, file.imports()[0])
+            .unwrap()
+            .resolved_file_name,
+        "/src/number.ts"
+    );
+}

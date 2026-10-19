@@ -200,11 +200,23 @@ impl SnapshotHost {
         uri: &lsproto::DocumentUri,
         logger: Option<&dyn Logger>,
     ) -> Arc<Snapshot> {
+        let mut resource_request = base_snapshot.resource_request_for_document(uri);
+        let path = uri.path(base_snapshot.use_case_sensitive_file_names());
+        // Keep a synthetic program's native service from creating an unrelated inferred project.
+        if base_snapshot.get_default_project(uri).is_none()
+            && base_snapshot
+                .project_collection
+                .synthetic_projects()
+                .iter()
+                .any(|project| project.contains_file(&path))
+        {
+            resource_request.documents.clear();
+        }
         let mut change = SnapshotChange {
             reason: UpdateReason::RequestedLanguageServiceWithAutoImports,
             fs: Some(FsRef::Layered(Arc::clone(&base_snapshot.fs.fs))),
             file_system_override: base_snapshot.file_system_override,
-            resource_request: base_snapshot.resource_request_for_document(uri),
+            resource_request,
             ..Default::default()
         };
         change.resource_request.auto_imports = uri.clone();

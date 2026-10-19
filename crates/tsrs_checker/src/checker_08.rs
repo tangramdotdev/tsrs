@@ -330,8 +330,16 @@ impl Checker {
             _ => self.program.get_default_resolution_mode_for_file(importing_source_file),
         };
 
-        let resolved_module =
-            self.program.get_resolved_module(importing_source_file, module_reference, mode);
+        let resolved_module = match context_specifier {
+            Some(specifier)
+                if ast::is_string_literal_like(specifier)
+                    && specifier.text() == module_reference =>
+            {
+                self.program
+                    .get_resolved_module_from_module_specifier(importing_source_file, specifier)
+            }
+            _ => self.program.get_resolved_module(importing_source_file, module_reference, mode),
+        };
         let is_resolved = resolved_module.is_some_and(|r| r.is_resolved());
 
         let mut resolution_diagnostic: Option<&'static Message> = None;

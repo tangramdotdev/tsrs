@@ -28,6 +28,14 @@ pub trait Program: Send + Sync {
         module_reference: &str,
         mode: ResolutionMode,
     ) -> Option<P<ResolvedModule>>;
+    fn get_resolved_module_from_module_specifier(
+        &self,
+        file: P<SourceFile>,
+        module_specifier: P<Node>,
+    ) -> Option<P<ResolvedModule>> {
+        let mode = self.get_mode_for_usage_location(file, module_specifier);
+        self.get_resolved_module(file, module_specifier.text(), mode)
+    }
     fn get_resolved_modules(
         &self,
     ) -> &FxHashMap<Path, FxHashMap<ModeAwareCacheKey, P<ResolvedModule>>>;

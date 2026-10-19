@@ -931,6 +931,8 @@ impl Program {
             && file1.uses_uri_style_node_core_modules() == file2.uses_uri_style_node_core_modules()
             && equal_func(file1.imports(), file2.imports(), |n1, n2| {
                 equal_module_specifiers(n1, n2)
+                    && module::module_resolution_attributes_key(file1, n1)
+                        == module::module_resolution_attributes_key(file2, n2)
                     && self.get_mode_for_usage_location(file1, n1)
                         == self.get_mode_for_usage_location(file2, n2)
             })
@@ -1243,8 +1245,9 @@ impl Program {
         // Keys hold `&'static str`; a borrowed name cannot build a lookup key, and per-file caches are small.
         resolutions
             .iter()
-            .find(|(k, _)| k.name == module_reference && k.mode == mode)
-            .map(|(_, v)| *v)
+            .filter(|(key, _)| key.name == module_reference && key.mode == mode)
+            .min_by_key(|(key, _)| key.attributes)
+            .map(|(_, value)| *value)
     }
 
     pub fn get_resolved_module_from_module_specifier(
@@ -1257,7 +1260,23 @@ impl Program {
             "moduleSpecifier must be a StringLiteralLike"
         );
         let mode = self.get_mode_for_usage_location(file, module_specifier);
-        self.get_resolved_module(file, module_specifier.text(), mode)
+        let attributes = module::module_resolution_attributes_key(file, module_specifier);
+        let resolutions = self.resolved_modules.get(file.path())?;
+        let resolution = resolutions
+            .iter()
+            .find(|(key, _)| {
+                key.name == module_specifier.text()
+                    && key.mode == mode
+                    && key.attributes == attributes
+            })
+            .or_else(|| {
+                resolutions.iter().find(|(key, _)| {
+                    key.name == module_specifier.text()
+                        && key.mode == mode
+                        && key.attributes.is_none()
+                })
+            });
+        resolution.map(|(_, value)| *value)
     }
 
     pub fn get_resolved_modules(&self) -> &FxHashMap<Path, ModeAwareCache<P<ResolvedModule>>> {
@@ -3280,9 +3299,8 @@ impl Program {
                         continue;
                     }
                     if self.resolved_modules.contains_key(file.path()) {
-                        let mode = self.get_mode_for_usage_location(file, imp);
                         if let Some(resolved_module) = self
-                            .get_resolved_module(file, imp.text(), mode)
+                            .get_resolved_module_from_module_specifier(file, imp)
                             .filter(|r| r.is_resolved())
                         {
                             if !resolved_module.is_external_library_import {

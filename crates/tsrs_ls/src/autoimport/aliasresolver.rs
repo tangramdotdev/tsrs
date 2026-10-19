@@ -148,7 +148,7 @@ impl checker::Program for aliasResolver {
                 .entry(current_source_file.path().clone())
                 .or_default(),
         );
-        let key = ModeAwareCacheKey { name: alloc_str(module_reference), mode };
+        let key = ModeAwareCacheKey { attributes: None, name: alloc_str(module_reference), mode };
         if let Some(&resolved) = cache.lock().unwrap().get(&key) {
             return Some(resolved);
         }

@@ -50,6 +50,10 @@ pub use snapshot::*;
 pub use snapshothost::*;
 
 #[cfg(test)]
+mod autoimport_test;
+#[cfg(test)]
+mod lifecycle_test;
+#[cfg(test)]
 mod projectcollectionbuilder_test;
 #[cfg(test)]
 mod projecttestutil;

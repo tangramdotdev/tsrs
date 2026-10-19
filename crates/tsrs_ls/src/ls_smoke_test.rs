@@ -82,6 +82,14 @@ fn setup(files: &[(&str, &str)]) -> (LanguageService, Context) {
 }
 
 fn setup_with(files: &[(&str, &str)], vs: bool) -> (LanguageService, Context) {
+    setup_with_resolver(files, vs, None)
+}
+
+fn setup_with_resolver(
+    files: &[(&str, &str)],
+    vs: bool,
+    create_module_resolver: Option<tsrs_compiler::CreateModuleResolver>,
+) -> (LanguageService, Context) {
     let fs: Arc<dyn FS> =
         Arc::new(bundled::wrap_fs(vfstest::from_map(files.iter().map(|&(k, v)| (k, v)), true)));
     let config_host: &'static parseConfigHost =
@@ -96,7 +104,9 @@ fn setup_with(files: &[(&str, &str)], vs: bool) -> (LanguageService, Context) {
     assert_eq!(diagnostics, [] as [tsrs_core::P<tsrs_ast::Diagnostic>; 0]);
     let host: Arc<dyn CompilerHost> =
         new_compiler_host("/", std::sync::Arc::clone(&fs), &bundled::lib_path(), None, None, None);
-    let program: &'static Program = new_program(ProgramOptions::new(P::new(config.unwrap()), host));
+    let mut options = ProgramOptions::new(P::new(config.unwrap()), host);
+    options.create_module_resolver = create_module_resolver;
+    let program: &'static Program = new_program(options);
     let fs_for_lines = std::sync::Arc::clone(&fs);
     let converters =
         lsconv::new_converters(lsproto::PositionEncodingKind::UTF16, move |file_name| {
@@ -602,4 +612,96 @@ fn semantic_tokens_property_of_lazily_resolved_interface() {
         json(&ls.provide_semantic_tokens(&ctx, &uri).unwrap()),
         r#"{"data":[0,10,1,3,1,0,2,1,5,1,0,6,1,7,1,0,12,1,3,0,0,2,1,5,0,0,4,3,9,1,0,5,1,3,0,0,2,1,5,0,0,4,3,14,1,1,17,6,13,1,0,7,1,5,1,0,3,1,7,1,0,3,1,5,0,0,4,1,3,0,0,2,1,5,0,1,0,6,13,0,0,10,3,9,0,0,4,3,14,0]}"#
     );
+}
+
+struct AttributeResolver(tsrs_module::DefaultResolver);
+
+impl tsrs_module::Resolver for AttributeResolver {
+    fn uses_import_attributes(&self) -> bool {
+        true
+    }
+
+    fn resolve_module_name_literal(
+        &self,
+        literal: P<tsrs_ast::Node>,
+        _source_file: P<tsrs_ast::SourceFile>,
+        containing_file: &str,
+        mode: tsrs_core::ResolutionMode,
+        redirect: Option<&dyn tsrs_module::ResolvedProjectReference>,
+    ) -> Result<(P<tsrs_module::ResolvedModule>, Vec<tsrs_module::DiagAndArgs>), String> {
+        let attributes = tsrs_module::module_resolution_attributes(literal);
+        let name = attributes.iter().find(|(name, _)| *name == "kind").unwrap().1;
+        self.0.resolve_module_name(&format!("./{name}.js"), containing_file, mode, redirect)
+    }
+
+    fn resolve_module_name(
+        &self,
+        name: &str,
+        containing_file: &str,
+        mode: tsrs_core::ResolutionMode,
+        redirect: Option<&dyn tsrs_module::ResolvedProjectReference>,
+    ) -> Result<(P<tsrs_module::ResolvedModule>, Vec<tsrs_module::DiagAndArgs>), String> {
+        self.0.resolve_module_name(name, containing_file, mode, redirect)
+    }
+
+    fn resolve_module_name_from_directory(
+        &self,
+        name: &str,
+        containing_directory: &str,
+        mode: tsrs_core::ResolutionMode,
+    ) -> Result<(P<tsrs_module::ResolvedModule>, Vec<tsrs_module::DiagAndArgs>), String> {
+        self.0.resolve_module_name_from_directory(name, containing_directory, mode)
+    }
+
+    fn resolve_type_reference_directive(
+        &self,
+        name: &str,
+        containing_file: &str,
+        mode: tsrs_core::ResolutionMode,
+        redirect: Option<&dyn tsrs_module::ResolvedProjectReference>,
+    ) -> (P<tsrs_module::ResolvedTypeReferenceDirective>, Vec<tsrs_module::DiagAndArgs>) {
+        self.0.resolve_type_reference_directive(name, containing_file, mode, redirect)
+    }
+
+    fn get_resolution_data(&self) -> P<tsrs_module::ResolutionData> {
+        self.0.get_resolution_data()
+    }
+}
+
+#[test]
+fn import_attributes_select_hover_and_definition_targets() {
+    const INDEX: &str = r#"
+import { value as number } from "dep" with { kind: "number" };
+import { value as string } from "dep" with { kind: "string" };
+export const numeric = number;
+export const text = string;
+"#;
+    let files = [
+        (
+            "/tsconfig.json",
+            r#"{"compilerOptions":{"module":"esnext","moduleResolution":"bundler","strict":true},"files":["index.ts"]}"#,
+        ),
+        ("/index.ts", INDEX),
+        ("/number.ts", "export const value = 1;"),
+        ("/string.ts", "export const value = 'string';"),
+    ];
+    let factory: tsrs_compiler::CreateModuleResolver =
+        Arc::new(|options| Box::new(AttributeResolver(tsrs_module::new_resolver(options))));
+    let (ls, ctx) = setup_with_resolver(&files, false, Some(factory));
+    let uri = lsconv::file_name_to_document_uri("/index.ts");
+    for (marker, target) in [("number;", "file:///number.ts"), ("string;", "file:///string.ts")] {
+        let response =
+            json(&ls.provide_definition(&ctx, &uri, position_of(INDEX, marker)).unwrap());
+        assert!(response.contains(target), "{response}");
+    }
+    for (marker, text) in [("numeric", "const numeric: 1"), ("text =", r#"const text: \"string\""#)]
+    {
+        let params = lsproto::HoverParams {
+            text_document: lsproto::TextDocumentIdentifier { uri: uri.clone() },
+            position: position_of(INDEX, marker),
+            ..Default::default()
+        };
+        let response = json(&ls.provide_hover(&ctx, &params).unwrap());
+        assert!(response.contains(text), "{response}");
+    }
 }

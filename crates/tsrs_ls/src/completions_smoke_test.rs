@@ -318,3 +318,70 @@ fn completions_preferences() {
 fn completions_registry_not_prepared() {
     run_profile("autoimports");
 }
+
+#[test]
+fn local_completion_resolves_with_a_fresh_program() {
+    const SOURCE: &str = "/** Greet a friend. */\nexport function greet(name = \"\") {\n    return name;\n}\nexport function welcome() {\n    return greet(\"Ada\");\n}\ngre\n";
+    for extension in ["js", "ts"] {
+        let file_name = format!("/index.{extension}");
+        let make_service = || {
+            let fs: Arc<dyn FS> = Arc::new(vfstest::from_map([(file_name.as_str(), SOURCE)], true));
+            let compiler_options = tsrs_core::CompilerOptions {
+                allow_js: tsrs_core::Tristate::True,
+                check_js: tsrs_core::Tristate::True,
+                module: tsrs_core::ModuleKind::ESNext,
+                module_detection: tsrs_core::ModuleDetectionKind::Force,
+                no_lib: tsrs_core::Tristate::True,
+                target: tsrs_core::ScriptTarget::ESNext,
+                ..Default::default()
+            };
+            let config = tsoptions::new_parsed_command_line(
+                P::new(compiler_options),
+                vec![file_name.clone()],
+                Vec::new(),
+                tsrs_core::tspath::ComparePathsOptions {
+                    current_directory: "/".to_string(),
+                    use_case_sensitive_file_names: true,
+                },
+            );
+            let host = new_compiler_host("/", Arc::clone(&fs), "", None, None, None);
+            let program = new_program(ProgramOptions::new(P::new(config), host));
+            let fs_for_lines = Arc::clone(&fs);
+            let converters =
+                lsconv::new_converters(lsproto::PositionEncodingKind::UTF16, move |file_name| {
+                    fs_for_lines.read_file(file_name).map(|text| compute_lsp_line_starts(&text))
+                });
+            let mut preferences = crate::lsutil::new_default_user_preferences();
+            preferences.include_completions_for_module_exports = tsrs_core::Tristate::False;
+            preferences.include_completions_for_import_statements = tsrs_core::Tristate::False;
+            let host = Arc::new(TestHost { fs, converters, preferences });
+            new_language_service(ProjectID("fresh".to_string()), program, host, &file_name)
+        };
+        let service = make_service();
+        let context = Context::background();
+        let uri = lsconv::file_name_to_document_uri(&file_name);
+        let position = lsproto::Position { line: 7, character: 3 };
+        let output = service.provide_completion(&context, &uri, position, None).unwrap();
+        let item = output
+            .items
+            .or_else(|| output.list.map(|list| list.items))
+            .unwrap()
+            .into_iter()
+            .find(|item| item.label == "greet")
+            .unwrap();
+        let item = lsproto::CompletionItem::from_json(&item.to_json()).unwrap();
+        let data = item.data.clone();
+        let same = service.resolve_completion_item(&context, item.clone(), data.as_ref()).unwrap();
+        assert!(same.detail.is_some(), "same program {extension}: {same:?}");
+        let fresh = make_service();
+        let fresh = fresh.resolve_completion_item(&context, item, data.as_ref()).unwrap();
+        assert!(fresh.detail.is_some(), "fresh program {extension}: {fresh:?}");
+        assert!(fresh.detail.as_deref().unwrap().contains("string"), "{fresh:?}");
+        assert!(
+            fresh.documentation.as_ref().unwrap().as_string().contains("Greet a friend"),
+            "{fresh:?}"
+        );
+        assert_eq!(fresh.detail, same.detail);
+        assert_eq!(fresh.documentation, same.documentation);
+    }
+}

@@ -6,6 +6,7 @@
 //   or everything a full build allocated on the calling thread);
 // - the base region: the full build's region, shared by every version cloned from it (`UpdateProgram` hands the
 //   shared processed-file data and the symlink cache to the next version);
+// - the regions of its externally allocated compiler options and parsed command line;
 // - the regions of its source files (each parsed file version has one, see parsecache.rs);
 // - through its checker pool, the checkers' regions.
 //
@@ -27,6 +28,7 @@ pub(crate) struct programOwner {
     region: Region,
     pub(crate) base: Region,
     files: Vec<Region>,
+    configuration: Vec<Region>,
 }
 
 impl programOwner {
@@ -53,6 +55,13 @@ impl programOwner {
             .into_iter()
             .flatten()
             .collect();
+        // Embedded hosts may allocate the command line and options in a request region.
+        let configuration = Region::containing_all(
+            [program.command_line().addr(), program.options().addr()].into_iter(),
+        )
+        .into_iter()
+        .flatten()
+        .collect();
         log_region(|| {
             format!(
                 "program {:p}: created (region {} KiB, base {} KiB)",
@@ -61,7 +70,7 @@ impl programOwner {
                 base.allocated_bytes() >> 10
             )
         });
-        programOwner { program, checker_pool, region, base, files }
+        programOwner { program, checker_pool, region, base, files, configuration }
     }
 }
 
@@ -74,10 +83,11 @@ impl Drop for programOwner {
     fn drop(&mut self) {
         log_region(|| {
             format!(
-                "program {:p}: freed ({} files, region {} KiB)",
+                "program {:p}: freed ({} files, region {} KiB, {} configuration regions)",
                 self.program,
                 self.files.len(),
-                self.region.allocated_bytes() >> 10
+                self.region.allocated_bytes() >> 10,
+                self.configuration.len()
             )
         });
         if let Some(pool) = &self.checker_pool {
