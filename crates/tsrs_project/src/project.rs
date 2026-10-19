@@ -84,7 +84,7 @@ impl InferredProjectID {
 
 impl SyntheticProjectID {
     // project.go:56
-    fn as_id(&self) -> ID {
+    pub fn as_id(&self) -> ID {
         ID(self.0.clone())
     }
 }
@@ -468,7 +468,7 @@ impl Project {
     }
 
     // project.go:353
-    fn id_string(&self) -> String {
+    pub fn id_string(&self) -> String {
         self.id.0.clone()
     }
 

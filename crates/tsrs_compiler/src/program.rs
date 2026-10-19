@@ -927,6 +927,8 @@ impl Program {
             && file1.uses_uri_style_node_core_modules() == file2.uses_uri_style_node_core_modules()
             && equal_func(file1.imports(), file2.imports(), |n1, n2| {
                 equal_module_specifiers(n1, n2)
+                    && module::module_resolution_attributes_key(file1, n1)
+                        == module::module_resolution_attributes_key(file2, n2)
                     && self.get_mode_for_usage_location(file1, n1)
                         == self.get_mode_for_usage_location(file2, n2)
                     && n1.parent().is_some_and(ast::is_source_phase_import)
@@ -1215,7 +1217,15 @@ impl Program {
         mode: ResolutionMode,
     ) -> Option<P<ResolvedModule>> {
         let resolutions = self.resolved_modules.get(path)?;
-        tsrs_module::mode_aware_cache_get(resolutions, module_reference, mode).copied()
+        tsrs_module::mode_aware_cache_get(resolutions, module_reference, mode).copied().or_else(
+            || {
+                resolutions
+                    .iter()
+                    .filter(|(key, _)| key.name == module_reference && key.mode == mode)
+                    .min_by_key(|(key, _)| key.attributes)
+                    .map(|(_, value)| *value)
+            },
+        )
     }
 
     pub fn get_resolved_module_from_module_specifier(
@@ -1231,7 +1241,12 @@ impl Program {
             return None;
         }
         let mode = self.get_mode_for_usage_location(file, module_specifier);
-        self.get_resolved_module(file, module_specifier.text(), mode)
+        let attributes = module::module_resolution_attributes_key(file, module_specifier);
+        let resolutions = self.resolved_modules.get(file.path())?;
+        let name = module_specifier.text();
+        tsrs_module::mode_aware_cache_get_with_attributes(resolutions, name, mode, attributes)
+            .or_else(|| tsrs_module::mode_aware_cache_get(resolutions, name, mode))
+            .copied()
     }
 
     pub fn get_resolved_modules(&self) -> &FxHashMap<Path, ModeAwareCache<P<ResolvedModule>>> {
@@ -3277,57 +3292,53 @@ impl Program {
                     {
                         continue;
                     }
-                    if self.resolved_modules.contains_key(file.path()) {
-                        let mode = self.get_mode_for_usage_location(file, imp);
-                        if let Some(resolved_module) = self
-                            .get_resolved_module(file, imp.text(), mode)
+                    if self.resolved_modules.contains_key(file.path())
+                        && let Some(resolved_module) = self
+                            .get_resolved_module_from_module_specifier(file, imp)
                             .filter(|r| r.is_resolved())
-                        {
-                            if !resolved_module.is_external_library_import {
-                                continue 'imports;
-                            }
-                            // Priority order for getting package name:
-                            // 1. PackageId.Name (requires both name and version in package.json)
-                            let mut name = resolved_module.package_id.name.to_string();
-                            if name.is_empty() {
-                                // 2. GetPackageScopeForPath - get name from package.json in the package directory
-                                if let Some(package_scope) = resolver
-                                    .get_package_scope_for_path(resolved_module.resolved_file_name)
-                                    && package_scope.exists()
-                                    && let Some(scope_name) = package_scope
-                                        .contents
-                                        .and_then(|c| c.get().name.get_value())
-                                {
-                                    name.clone_from(scope_name);
-                                }
-                            }
-                            if name.is_empty() {
-                                // 3. GetPackageNameFromDirectory - extract from node_modules path
-                                name = tsrs_modulespecifiers::get_package_name_from_directory(
-                                    resolved_module.resolved_file_name,
-                                );
-                            }
-                            // 4. If all fail, don't add empty string
-                            if !name.is_empty() {
-                                package_names.resolved.add(name.clone());
-                                // Detect deep imports: subpath imports in packages without exports.
-                                // These are imports like "lodash/fp" where the package has no exports
-                                // map, so auto-import can only find them via recursive directory search.
-                                let (_, rest) = module::parse_package_name(imp.text());
-                                if !rest.is_empty()
-                                    && let Some(scope) = resolver.get_package_scope_for_path(
-                                        resolved_module.resolved_file_name,
-                                    )
-                                    && scope.exists()
-                                    && !scope.contents.is_some_and(|c| c.exports.is_present())
-                                {
-                                    package_names.deep_import_packages.add(
-                                        module::get_package_name_from_types_package_name(&name),
-                                    );
-                                }
-                            }
+                    {
+                        if !resolved_module.is_external_library_import {
                             continue 'imports;
                         }
+                        // Priority order for getting package name:
+                        // 1. PackageId.Name (requires both name and version in package.json)
+                        let mut name = resolved_module.package_id.name.to_string();
+                        if name.is_empty() {
+                            // 2. GetPackageScopeForPath - get name from package.json in the package directory
+                            if let Some(package_scope) = resolver
+                                .get_package_scope_for_path(resolved_module.resolved_file_name)
+                                && package_scope.exists()
+                                && let Some(scope_name) =
+                                    package_scope.contents.and_then(|c| c.get().name.get_value())
+                            {
+                                name.clone_from(scope_name);
+                            }
+                        }
+                        if name.is_empty() {
+                            // 3. GetPackageNameFromDirectory - extract from node_modules path
+                            name = tsrs_modulespecifiers::get_package_name_from_directory(
+                                resolved_module.resolved_file_name,
+                            );
+                        }
+                        // 4. If all fail, don't add empty string
+                        if !name.is_empty() {
+                            package_names.resolved.add(name.clone());
+                            // Detect deep imports: subpath imports in packages without exports.
+                            // These are imports like "lodash/fp" where the package has no exports
+                            // map, so auto-import can only find them via recursive directory search.
+                            let (_, rest) = module::parse_package_name(imp.text());
+                            if !rest.is_empty()
+                                && let Some(scope) = resolver
+                                    .get_package_scope_for_path(resolved_module.resolved_file_name)
+                                && scope.exists()
+                                && !scope.contents.is_some_and(|c| c.exports.is_present())
+                            {
+                                package_names
+                                    .deep_import_packages
+                                    .add(module::get_package_name_from_types_package_name(&name));
+                            }
+                        }
+                        continue 'imports;
                     }
                     package_names.unresolved.add(imp.text().to_string());
                 }

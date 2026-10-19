@@ -1,7 +1,7 @@
 use std::fmt;
 
 use bitflags::bitflags;
-use tsrs_ast::Diagnostic;
+use tsrs_ast::{Diagnostic, Node, SourceFile};
 use tsrs_core::tspath;
 use tsrs_core::{CompilerOptions, P, ResolutionMode};
 use tsrs_vfs::FS;
@@ -15,6 +15,28 @@ pub trait ResolutionHost: Send + Sync {
 }
 
 pub trait Resolver: Send + Sync {
+    /// Opt in to import-attribute-aware per-file resolution caching.
+    fn uses_import_attributes(&self) -> bool {
+        false
+    }
+
+    /// Resolve a literal with its native import usage and source context.
+    fn resolve_module_name_literal(
+        &self,
+        module_specifier: P<Node>,
+        _containing_source_file: P<SourceFile>,
+        containing_file: &str,
+        resolution_mode: ResolutionMode,
+        redirected_reference: Option<&dyn ResolvedProjectReference>,
+    ) -> Result<(P<ResolvedModule>, Vec<DiagAndArgs>), String> {
+        self.resolve_module_name(
+            module_specifier.text(),
+            containing_file,
+            resolution_mode,
+            redirected_reference,
+        )
+    }
+
     fn resolve_module_name(
         &self,
         module_name: &str,
@@ -40,6 +62,8 @@ pub trait Resolver: Send + Sync {
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct ModeAwareCacheKey {
+    /// Complete attribute syntax for an opted-in native resolver; absent for ordinary name/mode caches.
+    pub attributes: Option<&'static str>,
     pub name: &'static str,
     pub mode: ResolutionMode,
 }

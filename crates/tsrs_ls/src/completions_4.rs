@@ -351,6 +351,7 @@ impl LanguageService {
         _position: u32,
         doc_format: lsproto::MarkupKind,
     ) -> lsproto::CompletionItem {
+        let symbol = checker.get_export_symbol_of_symbol(symbol);
         let (quick_info, documentation, _, _) = self.get_quick_info_and_documentation_for_symbol(
             checker,
             Some(symbol),

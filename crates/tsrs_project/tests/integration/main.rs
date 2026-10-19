@@ -1,7 +1,9 @@
 mod background {
     mod queue_test;
 }
+mod autoimport_test;
 mod checkerpool_test;
+mod lifecycle_test;
 mod overlayfs_test;
 mod projectcollectionbuilder_test;
 mod projecttestutil;

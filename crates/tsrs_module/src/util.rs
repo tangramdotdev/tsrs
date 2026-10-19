@@ -1,6 +1,6 @@
 use std::sync::LazyLock;
 
-use tsrs_ast::SourceFile;
+use tsrs_ast::{self as ast, Kind, Node, SourceFile};
 use tsrs_core::semver;
 use tsrs_core::tspath;
 use tsrs_core::{CompilerOptions, JsxEmit, P};
@@ -223,4 +223,84 @@ pub fn try_get_js_extension_for_file(file_name: &str, options: &CompilerOptions)
         }
         _ => "",
     }
+}
+
+/// Return the native attribute container for an import literal, including dynamic import options.
+pub fn get_module_resolution_attributes(module_specifier: P<Node>) -> Option<P<Node>> {
+    let parent = module_specifier.parent()?;
+    if ast::has_import_attributes(parent) {
+        return ast::get_import_attributes(parent);
+    }
+    match parent.kind() {
+        Kind::LiteralType => {
+            let parent = parent.parent()?;
+            if parent.kind() == Kind::ImportType {
+                return ast::get_import_attributes(parent);
+            }
+            None
+        }
+        Kind::CallExpression
+            if parent.expression().is_some_and(|node| node.kind() == Kind::ImportKeyword) =>
+        {
+            parent.arguments().get(1).copied()
+        }
+        _ => None,
+    }
+}
+
+/// Return sorted string-valued import attributes without discarding the native container.
+pub fn module_resolution_attributes(
+    module_specifier: P<Node>,
+) -> Vec<(&'static str, &'static str)> {
+    let Some(attributes) = get_module_resolution_attributes(module_specifier) else {
+        return Vec::new();
+    };
+    let mut result = Vec::new();
+    if attributes.kind() == Kind::ImportAttributes {
+        for &attribute in attributes.as_import_attributes().attributes.nodes() {
+            let attribute = attribute.as_import_attribute();
+            if let Some(name) = attribute.name
+                && ast::is_string_literal_like(attribute.value)
+            {
+                result.push((name.text(), attribute.value.text()));
+            }
+        }
+    } else if attributes.kind() == Kind::ObjectLiteralExpression {
+        for &property in attributes.as_object_literal_expression().properties.nodes() {
+            if property.kind() != Kind::PropertyAssignment
+                || property.name().is_none_or(|name| name.text() != "with")
+            {
+                continue;
+            }
+            let attributes = property.as_property_assignment().initializer();
+            if attributes.kind() != Kind::ObjectLiteralExpression {
+                continue;
+            }
+            for &property in attributes.as_object_literal_expression().properties.nodes() {
+                if property.kind() != Kind::PropertyAssignment {
+                    continue;
+                }
+                let value = property.as_property_assignment().initializer();
+                if let Some(name) = property.name()
+                    && matches!(name.kind(), Kind::Identifier | Kind::StringLiteral)
+                    && ast::is_string_literal_like(value)
+                {
+                    result.push((name.text(), value.text()));
+                }
+            }
+        }
+    }
+    result.sort_unstable();
+    result
+}
+
+/// Borrow the complete attribute syntax as a stable cache key across source-file reparses.
+pub fn module_resolution_attributes_key(
+    source_file: P<SourceFile>,
+    module_specifier: P<Node>,
+) -> Option<&'static str> {
+    let attributes = get_module_resolution_attributes(module_specifier)?;
+    let start = attributes.loc().source_pos()? as usize;
+    let end = attributes.loc().source_end()? as usize;
+    source_file.text().get(start..end)
 }

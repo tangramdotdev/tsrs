@@ -15,15 +15,17 @@ use crate::types::{
 
 pub type ModeAwareCache<T> = HashMap<ModeAwareCacheKey, T, FxBuildHasher>;
 
+/// Hashes like `ModeAwareCacheKey`, whose derived `Hash` visits the same fields in the same order.
 #[derive(Hash)]
 struct ModeAwareCacheLookup<'a> {
+    attributes: Option<&'a str>,
     name: &'a str,
     mode: ResolutionMode,
 }
 
 impl Equivalent<ModeAwareCacheKey> for ModeAwareCacheLookup<'_> {
     fn equivalent(&self, key: &ModeAwareCacheKey) -> bool {
-        self.name == key.name && self.mode == key.mode
+        self.attributes == key.attributes && self.name == key.name && self.mode == key.mode
     }
 }
 
@@ -33,7 +35,17 @@ pub fn mode_aware_cache_get<'a, T>(
     name: &str,
     mode: ResolutionMode,
 ) -> Option<&'a T> {
-    cache.get(&ModeAwareCacheLookup { name, mode })
+    mode_aware_cache_get_with_attributes(cache, name, mode, None)
+}
+
+/// Looks up a mode-aware cache entry partitioned by import attribute syntax.
+pub fn mode_aware_cache_get_with_attributes<'a, T>(
+    cache: &'a ModeAwareCache<T>,
+    name: &str,
+    mode: ResolutionMode,
+    attributes: Option<&str>,
+) -> Option<&'a T> {
+    cache.get(&ModeAwareCacheLookup { attributes, name, mode })
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]

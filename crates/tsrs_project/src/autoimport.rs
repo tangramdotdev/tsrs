@@ -113,7 +113,13 @@ impl ResolutionHost for AutoImportRegistryCloneHost {
 impl RegistryCloneHost for AutoImportRegistryCloneHost {
     // autoimport.go:99
     fn get_default_project(&self, path: &Path) -> (Option<ProjectID>, Option<&'static Program>) {
-        let Some(project) = self.project_collection.get_default_project(path) else {
+        let project = self.project_collection.get_default_project(path).or_else(|| {
+            self.project_collection
+                .synthetic_projects()
+                .into_iter()
+                .find(|project| project.contains_file(path))
+        });
+        let Some(project) = project else {
             return (None, None);
         };
         (Some(ProjectID(project.id().0)), project.get_program())

@@ -1776,6 +1776,7 @@ impl NodeBuilderImpl {
             resolution_mode = c.program.get_default_resolution_mode_for_file(context_file);
         }
         let cache_key = tsrs_module::ModeAwareCacheKey {
+            attributes: None,
             name: context_file.get().path().as_str(),
             mode: resolution_mode,
         };

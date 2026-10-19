@@ -153,7 +153,7 @@ impl checker::Program for AliasResolver {
         {
             return Some(resolved);
         }
-        let key = ModeAwareCacheKey { name: alloc_str(module_reference), mode };
+        let key = ModeAwareCacheKey { attributes: None, name: alloc_str(module_reference), mode };
         let (resolved, _) = self
             .module_resolver
             .resolve_module_name(module_reference, current_source_file.file_name(), mode, None)

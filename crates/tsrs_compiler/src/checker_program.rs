@@ -60,6 +60,14 @@ impl tsrs_checker::Program for Program {
         Program::get_resolved_module(self, current_source_file, module_reference, mode)
     }
 
+    fn get_resolved_module_from_module_specifier(
+        &self,
+        file: P<SourceFile>,
+        module_specifier: P<Node>,
+    ) -> Option<P<ResolvedModule>> {
+        Program::get_resolved_module_from_module_specifier(self, file, module_specifier)
+    }
+
     fn get_resolved_modules(&self) -> &FxHashMap<Path, ModeAwareCache<P<ResolvedModule>>> {
         Program::get_resolved_modules(self)
     }

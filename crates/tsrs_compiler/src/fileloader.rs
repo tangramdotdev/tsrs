@@ -466,7 +466,11 @@ impl FileLoader {
                 None,
             );
             type_resolutions_in_file.insert(
-                ModeAwareCacheKey { name: alloc_str(&name), mode: resolution_mode },
+                ModeAwareCacheKey {
+                    attributes: None,
+                    name: alloc_str(&name),
+                    mode: resolution_mode,
+                },
                 resolved,
             );
             type_resolutions_trace.extend(trace);
@@ -1281,7 +1285,7 @@ pub(crate) fn prefetch_resolutions(
             if file.ambient_module_names().contains(&module_name) {
                 let resolved_module = P::new(ResolvedModule::default());
                 resolutions_in_file.insert(
-                    ModeAwareCacheKey { name: alloc_str(module_name), mode },
+                    ModeAwareCacheKey { attributes: None, name: alloc_str(module_name), mode },
                     resolved_module,
                 );
                 let trace = if options_for_file.trace_resolution.is_true() {
@@ -1299,15 +1303,26 @@ pub(crate) fn prefetch_resolutions(
                 }));
                 continue;
             }
-            let resolution = resolver.resolve_module_name(module_name, &file_name, mode, redirect);
+            let resolution =
+                resolver.resolve_module_name_literal(entry, file, &file_name, mode, redirect);
             // As resolve_imports_and_module_augmentations inserts them, in the same order (a failed resolution gets a
             // default module).
             let resolved_module = match &resolution {
                 Ok((resolved, _)) => *resolved,
                 Err(_) => P::new(ResolvedModule::default()),
             };
-            resolutions_in_file
-                .insert(ModeAwareCacheKey { name: alloc_str(module_name), mode }, resolved_module);
+            resolutions_in_file.insert(
+                ModeAwareCacheKey {
+                    attributes: resolver
+                        .uses_import_attributes()
+                        .then(|| module::module_resolution_attributes_key(file, entry))
+                        .flatten()
+                        .map(alloc_str),
+                    name: alloc_str(module_name),
+                    mode,
+                },
+                resolved_module,
+            );
             let mut prepared = None;
             if let Ok((resolved, _)) = &resolution
                 && resolved.is_resolved()
@@ -1476,7 +1491,11 @@ impl FileLoader {
                 ),
             };
             type_resolutions_in_file.insert(
-                ModeAwareCacheKey { name: alloc_str(&ref_.file_name), mode: resolution_mode },
+                ModeAwareCacheKey {
+                    attributes: None,
+                    name: alloc_str(&ref_.file_name),
+                    mode: resolution_mode,
+                },
                 resolved,
             );
             let include_reason = FileIncludeReason::new_referenced(
@@ -1640,14 +1659,19 @@ impl FileLoader {
                         };
                         let resolved_module = P::new(ResolvedModule::default());
                         resolutions_in_file.insert(
-                            ModeAwareCacheKey { name: alloc_str(module_name), mode },
+                            ModeAwareCacheKey {
+                                attributes: None,
+                                name: alloc_str(module_name),
+                                mode,
+                            },
                             resolved_module,
                         );
                         resolutions_trace.extend(trace);
                         continue;
                     }
                     (
-                        self.resolver.resolve_module_name(module_name, &file_name, mode, redirect),
+                        self.resolver
+                            .resolve_module_name_literal(entry, file, &file_name, mode, redirect),
                         mode,
                         None,
                     )
@@ -1662,7 +1686,16 @@ impl FileLoader {
                     }
                 };
                 resolutions_in_file.insert(
-                    ModeAwareCacheKey { name: alloc_str(module_name), mode },
+                    ModeAwareCacheKey {
+                        attributes: self
+                            .resolver
+                            .uses_import_attributes()
+                            .then(|| module::module_resolution_attributes_key(file, entry))
+                            .flatten()
+                            .map(alloc_str),
+                        name: alloc_str(module_name),
+                        mode,
+                    },
                     resolved_module,
                 );
                 resolutions_trace.extend(trace);

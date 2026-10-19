@@ -1401,6 +1401,7 @@ impl FilesParser {
             if let Some(resolution) = value.resolution {
                 cache.insert(
                     tsrs_module::ModeAwareCacheKey {
+                        attributes: None,
                         name: tsrs_core::alloc_str(&value.library_name),
                         mode: ModuleKind::COMMON_JS,
                     },
